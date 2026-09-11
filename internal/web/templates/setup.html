@@ -1,0 +1,31 @@
+{{define "body"}}
+<div class="auth">
+  <h1>FuelMind</h1>
+  {{if .PINSet}}
+    <p class="muted">A PIN is already set. To change it, go to Settings (Phase 8). For now, <a href="/login">log in</a>.</p>
+  {{else}}
+    <p class="muted">Set a PIN to protect the dashboard. Anyone on the station network can reach this page &mdash; the PIN is the only thing that keeps them out.</p>
+    {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+    <form method="post" action="/setup">
+      <div>
+        <label for="pin-input">New PIN (8+ chars)</label>
+        <input type="password" id="pin-input" name="pin" autofocus autocomplete="new-password" placeholder="New PIN (8+ chars)" minlength="8">
+      </div>
+      <div>
+        <label for="pin-confirm-input">Confirm PIN</label>
+        <input type="password" id="pin-confirm-input" name="pin_confirm" autocomplete="new-password" placeholder="Confirm PIN" minlength="8">
+      </div>
+      <div class="telemetry-consent">
+        <input type="checkbox" id="telemetry-consent" name="telemetry_consent" value="true">
+        <label for="telemetry-consent">
+          Help improve FuelMind by sending anonymous usage and health data.
+          <br>
+          <span class="small">Your data is local by default. Only non-sensitive metrics (station ID, version, hardware tier, database size, error counts, last ingestion time) are sent. No fuel sales or customer data is transmitted.</span>
+        </label>
+      </div>
+      <button type="submit">Save PIN</button>
+    </form>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

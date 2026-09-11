@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Verify build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: gofmt check
+        run: |
+          if [ "$$(gofmt -s -l . | wc -l)" -ne 0 ]; then
+            echo "The following files are not gofmt-clean:"
+            gofmt -s -l .
+            exit 1
+          fi
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61.0
+          args: --timeout=5m
+
+  cross-build:
+    name: cross-build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+      - name: Build Windows .exe
+        run: |
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" -o dist/fuelmind-core.exe ./cmd/fuelmind-core
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuelmind-core-windows-amd64
+          path: dist/fuelmind-core.exe

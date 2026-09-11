@@ -1,0 +1,45 @@
+{{define "body"}}
+<div class="page">
+  <h1>FuelMind Score</h1>
+  <p class="muted">{{.Score.Date}}</p>
+
+  {{if .Score.Date}}
+  <div class="score">
+    <div class="score-num">{{.Score.Overall}}</div>
+    <div class="score-meta">
+      <span>Sales {{.Score.Sales}}</span>
+      <span>Inv <small class="muted">(unmeasured)</small></span>
+      <span>Cash <small class="muted">(unmeasured)</small></span>
+      <span>Credit {{.Score.Credit}}</span>
+      <span>Data {{.Score.DataQuality}}</span>
+      <span>Ops {{.Score.Operations}}</span>
+    </div>
+  </div>
+  {{else}}
+  <div class="empty-state">
+    <p class="muted">No score data available.</p>
+    <p class="muted small">The FuelMind Score appears once today's data has been processed.</p>
+  </div>
+  {{end}}
+
+  {{if .Issues}}
+  <h2>Today's Issues</h2>
+  <ul class="issues">
+    {{range .Issues}}
+    <li class="issue {{severityClass .severity}}">
+      <!-- Accessibility: Add icon before text for screen readers -->
+      <span class="issue-icon {{.severity}}" aria-hidden="true">
+        {{if eq .severity "alert"}}⚠{{else if eq .severity "warn"}}⚠{{else}}ℹ{{end}}
+      </span>
+      <span class="badge">{{.severity}}</span>
+      <span class="code">{{.code}}</span>
+      <span class="msg">{{.message}}</span>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="muted small">No issues today.</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

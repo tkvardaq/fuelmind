@@ -1,0 +1,36 @@
+# Build artifacts
+/fuelmind-core
+/fuelmind-core.exe
+/dist/
+/build/
+*.exe
+*.test
+*.out
+
+# Local data (never commit real customer data)
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-journal
+
+# Secrets / local config
+.env
+.env.local
+config.local.toml
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+/vendor/
+coverage.txt
+coverage.html

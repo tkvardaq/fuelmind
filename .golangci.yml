@@ -1,0 +1,37 @@
+# Minimal golangci-lint config for FuelMind.
+# Run locally: `golangci-lint run` (https://golangci-lint.run)
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck       # unchecked errors
+    - govet          # standard go vet
+    - ineffassign    # unused assignments
+    - staticcheck    # staticcheck.io rules
+    - unused         # unused variables, functions, types
+    - gofmt          # formatting (gofmt -s)
+    - gosimple       # simplifications
+    - gocritic       # opinionated style/bug checks
+    - errorlint      # fmt.Errorf("...%w", err) lint
+    - bodyclose      # http body close
+    - misspell       # common misspellings (English)
+
+linters-settings:
+  gocritic:
+    enabled-tags: [diagnostic, style, performance]
+    disabled-tags: [opinionated]
+
+issues:
+  exclude-rules:
+    # Tests can use panic, t.Fatal, etc.
+    - path: _test\.go
+      linters: [gocritic, errorlint]
+    # main package can use os.Exit, fmt.Println for CLI help.
+    - path: cmd/
+      linters: [gocritic]
+
+  max-issues-per-linter: 0
+  max-same-issues: 0

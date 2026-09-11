@@ -1,0 +1,34 @@
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FuelMind</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <!-- Skip to content link for accessibility -->
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+  
+  {{if .LoggedIn}}
+  <header class="topbar">
+    <div class="brand">FuelMind</div>
+    <nav>
+      <a href="/">Today</a>
+      <a href="/sales">Sales</a>
+      <a href="/credit">Credit</a>
+      <a href="/score">Score</a>
+    </nav>
+    <form method="post" action="/logout" class="logout-form">
+      <button class="btn-link" type="submit">Log out</button>
+    </form>
+  </header>
+  {{end}}
+  <main id="main-content">
+    {{template "body" .}}
+  </main>
+  <footer>
+    <small>FuelMind local &middot; v1.0.0 &middot; data stays on this machine</small>
+  </footer>
+</body>
+</html>{{end}}

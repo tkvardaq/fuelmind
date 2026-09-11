@@ -1,0 +1,35 @@
+{{define "body"}}
+<div class="page">
+  <h1>Credit outstanding</h1>
+  <p class="muted">Top 50 customers with outstanding balances.</p>
+
+  {{if .Rows}}
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Customer</th>
+        <th class="num">Outstanding</th>
+        <th class="num">Days overdue</th>
+        <th>Last payment</th>
+      </th>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td>{{.CustomerName}}</td>
+        <td class="num">{{formatMoney .OutstandingAmount}}</td>
+        <td class="num">{{.DaysOverdue}}</td>
+        <td>{{formatDate .LastPaymentDate}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <div class="empty-state">
+    <p class="muted">No credit data yet.</p>
+    <p class="muted small">Credit outstanding appears when customers make purchases on account.</p>
+  </div>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

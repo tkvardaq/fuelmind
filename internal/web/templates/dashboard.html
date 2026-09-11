@@ -1,0 +1,71 @@
+{{define "body"}}
+<div class="page">
+  <h1>Today</h1>
+  <p class="muted">{{.Totals.Date}}</p>
+
+  {{if gt .Totals.TransactionCount 0}}
+  <section class="cards">
+    <div class="card">
+      <div class="label">Revenue</div>
+      <div class="big">{{formatMoney .Totals.Revenue}}</div>
+    </div>
+    <div class="card">
+      <div class="label">Volume</div>
+      <div class="big">{{formatLiters .Totals.VolumeLiters}}</div>
+    </div>
+    <div class="card">
+      <div class="label">Transactions</div>
+      <div class="big">{{.Totals.TransactionCount}}</div>
+    </div>
+    <div class="card">
+      <div class="label">Top product</div>
+      <div class="big">{{or .Totals.TopProduct "—"}}</div>
+    </div>
+  </section>
+  {{else}}
+  <section class="empty-state">
+    <p class="muted">No transactions recorded today yet.</p>
+  </section>
+  {{end}}
+
+  {{if .Score.Date}}
+  <section>
+    <h2>FuelMind Score</h2>
+    <div class="score">
+      <div class="score-num">{{.Score.Overall}}</div>
+      <div class="score-meta">
+        <span>Sales {{.Score.Sales}}</span>
+        <span>Inv <small class="muted">(unmeasured)</small></span>
+        <span>Cash <small class="muted">(unmeasured)</small></span>
+        <span>Credit {{.Score.Credit}}</span>
+        <span>Data {{.Score.DataQuality}}</span>
+        <span>Ops {{.Score.Operations}}</span>
+      </div>
+    </div>
+    {{if .Issues}}
+    <ul class="issues">
+      {{range .Issues}}
+      <li class="issue {{severityClass .severity}}">
+        <!-- Accessibility: Add icon before text for screen readers -->
+        <span class="issue-icon {{.severity}}" aria-hidden="true">
+          {{if eq .severity "alert"}}⚠{{else if eq .severity "warn"}}⚠{{else}}ℹ{{end}}
+        </span>
+        <span class="badge">{{.severity}}</span>
+        <span class="code">{{.code}}</span>
+        <span class="msg">{{.message}}</span>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}
+    <p class="muted small">No issues today.</p>
+    {{end}}
+  </section>
+  {{else}}
+  <section>
+    <h2>FuelMind Score</h2>
+    <p class="muted">No score yet. Once today's data is in, the score appears here within 15 minutes (or immediately after the next POS file is processed).</p>
+  </section>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

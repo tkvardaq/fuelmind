@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="FuelMind" Language="1033" Version="1.0.0.0" Manufacturer="FuelMind Inc." UpgradeCode="8F6B2C4A-1D3E-4F7A-9B5C-2E8A6D0F1B3C">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of FuelMind is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Folder structure -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="FuelMind" />
+      </Directory>
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="FUELMIND_DATA" Name="FuelMind" />
+      </Directory>
+    </Directory>
+
+    <!-- Core binaries -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="FuelMindCoreExe" Guid="A1B2C3D4-E5F6-7890-ABCD-EF1234567890">
+        <File Id="fuelmind_core_exe" Source="..\fuelmind-core.exe" KeyPath="yes" />
+      </Component>
+
+
+      <Component Id="FuelMindSetupExe" Guid="C3D4E5F6-A7B8-9012-CDEF-123456789012">
+        <File Id="fuelmind_setup_exe" Source="..\fuelmind-setup.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- Data directory with proper cleanup on uninstall -->
+      <Component Id="FuelMindDataDir" Guid="D4E5F6A7-B8C9-0123-DEF0-234567890123">
+        <CreateFolder />
+        <RemoveFolder Id="RemoveFuelMindData" On="uninstall" />
+        <RegistryValue Root="HKLM" Key="Software\FuelMind" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Launcher binary component also handles service registration -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="FuelMindServiceComponent" Guid="E5F6A7B8-C9D0-1234-EF01-345678901234">
+        <File Id="fuelmind_launcher_svc" Source="..\fuelmind-launcher.exe" KeyPath="yes" />
+        <ServiceControl Id="FuelMindServiceControl"
+                        Name="FuelMindService"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+        <ServiceInstall Id="FuelMindServiceInstall"
+                        Name="FuelMindService"
+                        DisplayName="FuelMind Service"
+                        Description="FuelMind station agent service"
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Vital="yes"
+                        Interactive="no" />
+      </Component>
+    </DirectoryRef>
+
+    <!-- Launch first-run wizard after install completes -->
+    <CustomAction Id="LaunchSetupAction"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="[INSTALLFOLDER]fuelmind-setup.exe"
+                  Execute="immediate"
+                  Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <Custom Action="LaunchSetupAction" After="InstallFinalize">NOT Installed</Custom>
+    </InstallExecuteSequence>
+
+    <!-- Features -->
+    <Feature Id="ProductFeature" Title="FuelMind" Level="1">
+      <ComponentRef Id="FuelMindCoreExe" />
+      <ComponentRef Id="FuelMindServiceComponent" />
+      <ComponentRef Id="FuelMindSetupExe" />
+      <ComponentRef Id="FuelMindDataDir" />
+    </Feature>
+  </Product>
+</Wix>
