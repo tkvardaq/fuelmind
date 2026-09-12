@@ -1,7 +1,7 @@
 // Package storage owns the local SQLite database. It opens the file with
 // the pragmas we need (WAL, foreign keys, busy timeout), runs the
 // embedded migration set, and exposes typed methods for writing raw data
-// and (in later phases) reading it back for the normalizer and mart.
+// and reading it back for the normalizer, mart and dashboard.
 package storage
 
 import (
@@ -10,13 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	// Pure-Go SQLite driver (no CGo). Registered for the "sqlite" driver
 	// name so *sql.DB can open it.
 	_ "modernc.org/sqlite"
-	"golang.org/x/sys/windows"
-	"path/filepath"
 )
 
 // ErrNotFound is returned when a single-row lookup has no match.
@@ -26,69 +26,86 @@ var ErrNotFound = errors.New("fuelmind: not found")
 var ErrInvalidSession = errors.New("fuelmind: invalid or expired session")
 
 // Storage wraps a single SQLite database connection. The local core is
-// single-writer by design (one process, one station), so we set the
-// connection pool to a single connection — SQLite's locking layer is
-// happier that way.
+// single-writer by design (one process, one station), so the pool is
+// capped at one connection — SQLite's locking layer is happier that way.
 type Storage struct {
 	db *sql.DB
 }
 
-// Open creates a new SQLite database at the given path. The DSN sets
-// WAL mode, foreign keys, normal synchronous, and a 5s busy timeout
-// (Windows file locks occasionally contend; the timeout turns that into
-// a retry rather than a hard error).
+// Open creates or opens the SQLite database at path. The DSN sets WAL
+// mode, foreign keys, normal synchronous, and a 5s busy timeout.
 func Open(path string) (*Storage, error) {
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open %q: %w", path, err)
 	}
+	db.SetMaxOpenConns(1)
 	if err := db.PingContext(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: ping %q: %w", path, err)
 	}
-	// Integrity check: ensure the database file is not corrupted.
-	if ok, err := integrityCheck(db); err != nil {
+	// quick_check is O(pages) but skips the expensive index cross-checks
+	// of integrity_check, so boot stays fast on a large database.
+	var result string
+	if err := db.QueryRowContext(context.Background(), "PRAGMA quick_check").Scan(&result); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("storage: integrity check failed: %w", err)
-	} else if !ok {
-		_ = db.Close()
-		return nil, errors.New("storage: database corruption detected")
 	}
-	db.SetMaxOpenConns(1)
+	if result != "ok" {
+		_ = db.Close()
+		return nil, fmt.Errorf("storage: database corruption detected: %s", result)
+	}
 	return &Storage{db: db}, nil
 }
 
-// integrityCheck runs PRAGMA integrity_check and returns true if ok.
-func integrityCheck(db *sql.DB) (bool, error) {
-	var result string
-	err := db.QueryRowContext(context.Background(), "PRAGMA integrity_check").Scan(&result)
-	if err != nil {
-		return false, fmt.Errorf("integrity check query: %w", err)
-	}
-	return result == "ok", nil
-}
-
-// NewWithDB wraps an existing *sql.DB. Used by tests to point Storage
-// at an in-memory database (sql.Open("sqlite", ":memory:")).
+// NewWithDB wraps an existing *sql.DB (tests).
 func NewWithDB(db *sql.DB) *Storage {
 	return &Storage{db: db}
 }
 
-// DB returns the underlying *sql.DB. Reserved for the normalizer and
-// mart materializer (Phase 2+) and for ad-hoc queries from tooling.
-// Don't bypass the typed Write* methods from outside this package.
+// DB returns the underlying *sql.DB for the normalizer, mart and tooling.
 func (s *Storage) DB() *sql.DB { return s.db }
 
-// Close closes the database. Safe to call multiple times.
+// Close closes the database.
 func (s *Storage) Close() error { return s.db.Close() }
 
+// Path returns the on-disk path of the main database file, or "" for an
+// in-memory database.
+func (s *Storage) Path(ctx context.Context) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA database_list`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var seq int
+		var name, file string
+		if err := rows.Scan(&seq, &name, &file); err != nil {
+			return "", err
+		}
+		if name == "main" {
+			return file, nil
+		}
+	}
+	return "", rows.Err()
+}
+
+// BackupTo writes a transactionally consistent copy of the database to
+// dst using VACUUM INTO. dst must not exist.
+func (s *Storage) BackupTo(ctx context.Context, dst string) error {
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("storage: backup target %q already exists", dst)
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
+		return fmt.Errorf("storage: vacuum into %q: %w", dst, err)
+	}
+	return nil
+}
+
 // WriteRawTransactions inserts a batch of raw transactions in a single
-// transaction. Returns the number of rows actually inserted; rows whose
-// payload_hash already exists are silently skipped (dedup is the
-// whole point of the unique constraint).
-//
-// payloads and hashes must be the same length and 1:1 paired.
+// transaction. Rows whose payload_hash already exists are skipped (a
+// byte-identical re-ingest). Returns the number of rows inserted.
 func (s *Storage) WriteRawTransactions(ctx context.Context, batchID, posSourceID string, payloads [][]byte, hashes []string) (int, error) {
 	if len(payloads) != len(hashes) {
 		return 0, fmt.Errorf("storage: payloads (%d) and hashes (%d) length mismatch", len(payloads), len(hashes))
@@ -101,12 +118,7 @@ func (s *Storage) WriteRawTransactions(ctx context.Context, batchID, posSourceID
 	if err != nil {
 		return 0, fmt.Errorf("storage: begin tx: %w", err)
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
+	defer func() { _ = tx.Rollback() }()
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT OR IGNORE INTO raw_pos_transactions (pos_source_id, raw_payload, payload_hash, ingestion_batch_id)
@@ -129,44 +141,30 @@ func (s *Storage) WriteRawTransactions(ctx context.Context, batchID, posSourceID
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("storage: commit: %w", err)
 	}
-	committed = true
 	return inserted, nil
 }
 
-// RawTransaction is the minimal view a normalizer needs. We avoid
-// pulling raw_payload bytes back into Go on every call — the
-// normalizer can re-parse from the JSON-encoded payload that
-// csvwatch already produced.
+// RawTransaction is the minimal view a normalizer needs.
 type RawTransaction struct {
-	ID           int64
-	PosSourceID  string
-	RawPayload   string
-	BatchID      string
-	ReceivedAt   string // RFC 3339 string; we leave it to the caller to parse
+	ID          int64
+	PosSourceID string
+	RawPayload  string
+	BatchID     string
+	ReceivedAt  string
 }
 
-// UnnormalizedTransactions returns raw rows that have not yet been
-// normalized. Idempotency: it joins on the absence of a row in
-// `transactions` referencing the raw id. Capped by limit (0 = no
-// limit) so a long-running process can't OOM.
+// UnnormalizedTransactions returns raw rows that have been neither
+// normalized nor superseded by a newer export of the same POS
+// transaction. Capped by limit (0 = no limit).
 func (s *Storage) UnnormalizedTransactions(ctx context.Context, limit int) ([]RawTransaction, error) {
-	q := `
-		SELECT r.id, r.pos_source_id, r.raw_payload, r.ingestion_batch_id, r.received_at
-		FROM raw_pos_transactions r
-		LEFT JOIN transactions t ON t.raw_transaction_id = r.id
-		WHERE t.id IS NULL
-		ORDER BY r.id ASC
-	`
+	q := `SELECT id, pos_source_id, raw_payload, ingestion_batch_id, received_at
+	      FROM raw_unresolved ORDER BY id ASC`
+	args := []any{}
 	if limit > 0 {
 		q += " LIMIT ?"
+		args = append(args, limit)
 	}
-	var rows *sql.Rows
-	var err error
-	if limit > 0 {
-		rows, err = s.db.QueryContext(ctx, q, limit)
-	} else {
-		rows, err = s.db.QueryContext(ctx, q)
-	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("storage: query unnormalized: %w", err)
 	}
@@ -186,6 +184,8 @@ func (s *Storage) UnnormalizedTransactions(ctx context.Context, limit int) ([]Ra
 // NormalizedTransaction is the destination row from the normalizer.
 type NormalizedTransaction struct {
 	RawTransactionID int64
+	PosSourceID      string
+	ExternalID       string
 	ProductCode      string
 	QuantityLiters   float64
 	UnitPrice        float64
@@ -194,29 +194,97 @@ type NormalizedTransaction struct {
 	CustomerPhone    string
 	PumpID           string
 	Attendant        string
-	TransactionTime  string // RFC 3339
+	TransactionTime  string // RFC 3339, station-local offset
+	Flags            string // comma-separated data-quality flags
 }
 
-// WriteNormalizedTransaction inserts a single normalized row. The
-// `raw_transaction_id` column is UNIQUE, so re-running the normalizer
-// on the same raw row is a no-op (idempotency by design).
-func (s *Storage) WriteNormalizedTransaction(ctx context.Context, n NormalizedTransaction) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO transactions (
-			raw_transaction_id, product_code, quantity_liters, unit_price,
-			total_amount, payment_method, customer_phone, pump_id, attendant,
-			transaction_time
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		n.RawTransactionID, n.ProductCode, n.QuantityLiters, n.UnitPrice,
-		n.TotalAmount, n.PaymentMethod, nullableString(n.CustomerPhone),
-		nullableString(n.PumpID), nullableString(n.Attendant),
-		n.TransactionTime,
-	)
+// WriteNormalizedTransaction stores one normalized row.
+//
+// Idempotency has two layers:
+//   - raw_transaction_id is UNIQUE, so re-normalizing a raw row is a no-op.
+//   - (pos_source_id, external_id) is UNIQUE. When the POS re-exports a
+//     transaction it already sent (typically with a correction), the
+//     existing row is updated to the newer values and the older raw row
+//     is recorded in raw_superseded. Revenue is never counted twice.
+//
+// It returns true when an existing transaction was replaced.
+func (s *Storage) WriteNormalizedTransaction(ctx context.Context, n NormalizedTransaction) (replaced bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("storage: insert transaction: %w", err)
+		return false, fmt.Errorf("storage: begin: %w", err)
 	}
-	return nil
+	defer func() { _ = tx.Rollback() }()
+
+	args := []any{
+		n.ProductCode, n.QuantityLiters, n.UnitPrice, n.TotalAmount, n.PaymentMethod,
+		nullableString(n.CustomerPhone), nullableString(n.PumpID), nullableString(n.Attendant),
+		n.TransactionTime, n.Flags,
+	}
+
+	if n.ExternalID != "" {
+		var existingID, existingRaw int64
+		err := tx.QueryRowContext(ctx, `
+			SELECT id, raw_transaction_id FROM transactions
+			WHERE pos_source_id = ? AND external_id = ?`, n.PosSourceID, n.ExternalID,
+		).Scan(&existingID, &existingRaw)
+		switch {
+		case err == nil && existingRaw != n.RawTransactionID:
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE transactions SET
+					product_code = ?, quantity_liters = ?, unit_price = ?, total_amount = ?,
+					payment_method = ?, customer_phone = ?, pump_id = ?, attendant = ?,
+					transaction_time = ?, flags = ?, raw_transaction_id = ?
+				WHERE id = ?`, append(args, n.RawTransactionID, existingID)...); err != nil {
+				return false, fmt.Errorf("storage: replace transaction: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT OR REPLACE INTO raw_superseded (raw_transaction_id, superseded_by) VALUES (?, ?)`,
+				existingRaw, n.RawTransactionID); err != nil {
+				return false, fmt.Errorf("storage: record superseded: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM raw_normalize_errors WHERE raw_transaction_id = ?`, n.RawTransactionID); err != nil {
+				return false, err
+			}
+			return true, tx.Commit()
+		case err == nil:
+			return false, nil // same raw row, already stored
+		case !errors.Is(err, sql.ErrNoRows):
+			return false, fmt.Errorf("storage: lookup external id: %w", err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO transactions (
+			product_code, quantity_liters, unit_price, total_amount, payment_method,
+			customer_phone, pump_id, attendant, transaction_time, flags,
+			raw_transaction_id, pos_source_id, external_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		append(args, n.RawTransactionID, nullableString(n.PosSourceID), nullableString(n.ExternalID))...,
+	); err != nil {
+		return false, fmt.Errorf("storage: insert transaction: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM raw_normalize_errors WHERE raw_transaction_id = ?`, n.RawTransactionID); err != nil {
+		return false, err
+	}
+	return false, tx.Commit()
+}
+
+// RecordNormalizeError remembers why a raw row could not be normalized.
+// It returns true the first time a row fails, so callers can log once
+// instead of on every retry.
+func (s *Storage) RecordNormalizeError(ctx context.Context, rawID int64, msg string) (first bool, err error) {
+	var attempts int
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO raw_normalize_errors (raw_transaction_id, error) VALUES (?, ?)
+		ON CONFLICT(raw_transaction_id) DO UPDATE SET
+			error = excluded.error,
+			attempts = attempts + 1,
+			last_attempt_at = CURRENT_TIMESTAMP
+		RETURNING attempts`, rawID, msg).Scan(&attempts)
+	if err != nil {
+		return false, fmt.Errorf("storage: record normalize error: %w", err)
+	}
+	return attempts == 1, nil
 }
 
 func nullableString(s string) any {
@@ -226,15 +294,7 @@ func nullableString(s string) any {
 	return s
 }
 
-// ProductAlias is one row of the product_aliases table.
-type ProductAlias struct {
-	AliasText   string
-	ProductCode string
-}
-
-// ProductAliases returns the full alias table. The normalizer builds
-// an in-memory map from this once at start-up; for v1 there are 16
-// rows, so the load is trivial.
+// ProductAliases returns the full alias table as alias_text -> product_code.
 func (s *Storage) ProductAliases(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT alias_text, product_code FROM product_aliases`)
 	if err != nil {
@@ -243,19 +303,18 @@ func (s *Storage) ProductAliases(ctx context.Context) (map[string]string, error)
 	defer rows.Close()
 	out := make(map[string]string)
 	for rows.Next() {
-		var a ProductAlias
-		if err := rows.Scan(&a.AliasText, &a.ProductCode); err != nil {
+		var alias, code string
+		if err := rows.Scan(&alias, &code); err != nil {
 			return nil, fmt.Errorf("storage: scan alias: %w", err)
 		}
-		out[a.AliasText] = a.ProductCode
+		out[alias] = code
 	}
 	return out, rows.Err()
 }
 
-// --- Mart read helpers (Phase 4 dashboard) ---
+// --- Mart read helpers (dashboard) ---
 
-// DailySalesRow is one row of the daily_sales table, joined with the
-// product display name for dashboard rendering.
+// DailySalesRow is one row of daily_sales joined with the product name.
 type DailySalesRow struct {
 	Date             string
 	ProductCode      string
@@ -265,17 +324,18 @@ type DailySalesRow struct {
 	TransactionCount int
 }
 
-// RecentDailySales returns the last `days` days of sales, newest first.
+// RecentDailySales returns sales for the last `days` calendar days
+// (today included), newest first.
 func (s *Storage) RecentDailySales(ctx context.Context, days int) ([]DailySalesRow, error) {
-	q := `
+	cutoff := time.Now().AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT ds.date, ds.product_code, fp.display_name,
 		       ds.volume_liters, ds.revenue, ds.transaction_count
 		FROM daily_sales ds
 		JOIN fuel_products fp ON fp.product_code = ds.product_code
+		WHERE ds.date >= ?
 		ORDER BY ds.date DESC, ds.product_code ASC
-		LIMIT ?
-	`
-	rows, err := s.db.QueryContext(ctx, q, days*10) // rough cap; v1 has 3 products
+	`, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("storage: recent sales: %w", err)
 	}
@@ -292,7 +352,7 @@ func (s *Storage) RecentDailySales(ctx context.Context, days int) ([]DailySalesR
 	return out, rows.Err()
 }
 
-// TodayTotals returns aggregated metrics for today.
+// TodayTotals holds aggregated metrics for one day.
 type TodayTotals struct {
 	Date             string
 	Revenue          float64
@@ -301,40 +361,47 @@ type TodayTotals struct {
 	TopProduct       string
 }
 
+// TodayTotals returns today's totals from daily_sales (station-local date).
 func (s *Storage) TodayTotals(ctx context.Context) (TodayTotals, error) {
-	today := time.Now().Format("2006-01-02")
-	var t TodayTotals
-	t.Date = today
+	return s.DayTotals(ctx, time.Now().Format("2006-01-02"))
+}
+
+// DayTotals returns the totals for one date.
+func (s *Storage) DayTotals(ctx context.Context, date string) (TodayTotals, error) {
+	t := TodayTotals{Date: date}
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(revenue), 0),
 		       COALESCE(SUM(volume_liters), 0),
 		       COALESCE(SUM(transaction_count), 0)
 		FROM daily_sales WHERE date = ?
-	`, today).Scan(&t.Revenue, &t.VolumeLiters, &t.TransactionCount)
+	`, date).Scan(&t.Revenue, &t.VolumeLiters, &t.TransactionCount)
 	if err != nil {
-		return t, fmt.Errorf("storage: today totals: %w", err)
+		return t, fmt.Errorf("storage: day totals: %w", err)
 	}
-	_ = s.db.QueryRowContext(ctx, `
+	err = s.db.QueryRowContext(ctx, `
 		SELECT product_code FROM daily_sales
 		WHERE date = ? ORDER BY revenue DESC LIMIT 1
-	`, today).Scan(&t.TopProduct)
+	`, date).Scan(&t.TopProduct)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return t, fmt.Errorf("storage: top product: %w", err)
+	}
 	return t, nil
 }
 
 // FuelMindScore is one row of the station_health_score table.
 type FuelMindScore struct {
-	Date           string
-	Overall        int
-	Sales          int
-	Inventory      int
-	Cash           int
-	Credit         int
-	DataQuality    int
-	Operations     int
-	IssuesJSON     string
+	Date        string
+	Overall     int
+	Sales       int
+	Inventory   int
+	Cash        int
+	Credit      int
+	DataQuality int
+	Operations  int
+	IssuesJSON  string
 }
 
-// LatestScore returns the most recent score, or zero-value if none.
+// LatestScore returns the most recent score, or the zero value if none.
 func (s *Storage) LatestScore(ctx context.Context) (FuelMindScore, error) {
 	var sc FuelMindScore
 	err := s.db.QueryRowContext(ctx, `
@@ -343,7 +410,7 @@ func (s *Storage) LatestScore(ctx context.Context) (FuelMindScore, error) {
 		FROM station_health_score ORDER BY date DESC LIMIT 1
 	`).Scan(&sc.Date, &sc.Overall, &sc.Sales, &sc.Inventory, &sc.Cash,
 		&sc.Credit, &sc.DataQuality, &sc.Operations, &sc.IssuesJSON)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return sc, nil
 	}
 	return sc, err
@@ -352,14 +419,16 @@ func (s *Storage) LatestScore(ctx context.Context) (FuelMindScore, error) {
 // CreditRow is one row of credit_outstanding.
 type CreditRow struct {
 	CustomerPhone     string
+	AsOfDate          string
 	OutstandingAmount float64
 	TransactionCount  int
 	DaysOverdue       int
 }
 
+// RecentCredit returns the latest credit snapshot, largest balances first.
 func (s *Storage) RecentCredit(ctx context.Context, limit int) ([]CreditRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT customer_phone, outstanding_amount, transaction_count, days_overdue
+		SELECT customer_phone, as_of_date, outstanding_amount, transaction_count, days_overdue
 		FROM credit_outstanding
 		WHERE as_of_date = (SELECT MAX(as_of_date) FROM credit_outstanding)
 		ORDER BY outstanding_amount DESC
@@ -372,7 +441,7 @@ func (s *Storage) RecentCredit(ctx context.Context, limit int) ([]CreditRow, err
 	var out []CreditRow
 	for rows.Next() {
 		var c CreditRow
-		if err := rows.Scan(&c.CustomerPhone, &c.OutstandingAmount,
+		if err := rows.Scan(&c.CustomerPhone, &c.AsOfDate, &c.OutstandingAmount,
 			&c.TransactionCount, &c.DaysOverdue); err != nil {
 			return nil, err
 		}
@@ -381,41 +450,52 @@ func (s *Storage) RecentCredit(ctx context.Context, limit int) ([]CreditRow, err
 	return out, rows.Err()
 }
 
-// --- Dashboard user / session (Phase 4) ---
+// --- Dashboard user / session ---
 
 // DashboardUser is one row of dashboard_users.
 type DashboardUser struct {
-	ID          int64
-	Username    string
-	PinHash     string
-	PinSalt     string
-	PinIters    int
-	IsActive    bool
-	LastLoginAt sql.NullString
+	ID             int64
+	Username       string
+	PinHash        string
+	PinSalt        string
+	PinIters       int
+	IsActive       bool
+	LastLoginAt    sql.NullString
+	FailedAttempts int
+	LockUntil      time.Time // zero when not locked
 }
 
+// GetDashboardUser returns the user row, or ErrNotFound.
 func (s *Storage) GetDashboardUser(ctx context.Context, username string) (DashboardUser, error) {
 	var u DashboardUser
 	var active int
+	var lock sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, username, pin_hash, pin_salt, pin_iters, is_active, last_login_at
+		SELECT id, username, pin_hash, pin_salt, pin_iters, is_active, last_login_at,
+		       failed_attempts, lock_until
 		FROM dashboard_users WHERE username = ?
-	`, username).Scan(&u.ID, &u.Username, &u.PinHash, &u.PinSalt, &u.PinIters, &active, &u.LastLoginAt)
-	u.IsActive = active == 1
-	if err == sql.ErrNoRows {
+	`, username).Scan(&u.ID, &u.Username, &u.PinHash, &u.PinSalt, &u.PinIters, &active,
+		&u.LastLoginAt, &u.FailedAttempts, &lock)
+	if errors.Is(err, sql.ErrNoRows) {
 		return u, ErrNotFound
 	}
-	return u, err
+	if err != nil {
+		return u, err
+	}
+	u.IsActive = active == 1
+	if lock.Valid && lock.String != "" {
+		if t, perr := time.Parse(time.RFC3339Nano, lock.String); perr == nil {
+			u.LockUntil = t
+		}
+	}
+	return u, nil
 }
 
-// SetDashboardUserPIN updates the PIN for a user. pinHash and pinSalt
-// are the base64-encoded PBKDF2 outputs. pinIters is the iteration
-// count used (for forward-compat — the dashboard accepts any
-// non-zero iters value).
+// SetDashboardUserPIN updates the PIN for a user and clears any lockout.
 func (s *Storage) SetDashboardUserPIN(ctx context.Context, username, pinHash, pinSalt string, pinIters int) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE dashboard_users
-		SET pin_hash = ?, pin_salt = ?, pin_iters = ?
+		SET pin_hash = ?, pin_salt = ?, pin_iters = ?, failed_attempts = 0, lock_until = NULL
 		WHERE username = ?
 	`, pinHash, pinSalt, pinIters, username)
 	if err != nil {
@@ -428,14 +508,75 @@ func (s *Storage) SetDashboardUserPIN(ctx context.Context, username, pinHash, pi
 	return nil
 }
 
-// CreateSession writes a new auth_sessions row. The id should be a
-// cryptographically random 32-byte hex string.
+// RecordLoginFailure increments the failed-attempt counter. When it
+// reaches maxAttempts the account is locked for lockFor and the counter
+// resets. It returns the lock expiry (zero when not locked).
+func (s *Storage) RecordLoginFailure(ctx context.Context, username string, maxAttempts int, lockFor time.Duration) (time.Time, error) {
+	var attempts int
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE dashboard_users
+		SET failed_attempts = failed_attempts + 1, last_failed_at = ?
+		WHERE username = ?
+		RETURNING failed_attempts`, time.Now().UTC().Format(time.RFC3339Nano), username).Scan(&attempts)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if attempts < maxAttempts {
+		return time.Time{}, nil
+	}
+	until := time.Now().Add(lockFor).UTC()
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE dashboard_users SET failed_attempts = 0, lock_until = ? WHERE username = ?`,
+		until.Format(time.RFC3339Nano), username)
+	return until, err
+}
+
+// RecordLoginSuccess clears the failure counter and stamps last_login_at.
+func (s *Storage) RecordLoginSuccess(ctx context.Context, username string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE dashboard_users
+		SET failed_attempts = 0, lock_until = NULL, last_login_at = CURRENT_TIMESTAMP
+		WHERE username = ?`, username)
+	return err
+}
+
+// CreateSession writes a new auth_sessions row and purges expired ones.
 func (s *Storage) CreateSession(ctx context.Context, id string, userID int64, expiresAt time.Time, userAgent string) error {
+	if err := s.purgeExpiredSessions(ctx); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO auth_sessions (id, user_id, expires_at, user_agent)
 		VALUES (?, ?, ?, ?)
-	`, id, userID, expiresAt, userAgent)
+	`, id, userID, expiresAt.UTC(), userAgent)
 	return err
+}
+
+func (s *Storage) purgeExpiredSessions(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, expires_at FROM auth_sessions`)
+	if err != nil {
+		return err
+	}
+	var expired []string
+	now := time.Now()
+	for rows.Next() {
+		var id string
+		var exp time.Time
+		if err := rows.Scan(&id, &exp); err != nil {
+			rows.Close()
+			return err
+		}
+		if now.After(exp) {
+			expired = append(expired, id)
+		}
+	}
+	rows.Close()
+	for _, id := range expired {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // LookupSession returns the user_id for a session id, or
@@ -446,7 +587,7 @@ func (s *Storage) LookupSession(ctx context.Context, id string) (int64, error) {
 	err := s.db.QueryRowContext(ctx, `
 		SELECT user_id, expires_at FROM auth_sessions WHERE id = ?
 	`, id).Scan(&userID, &expiresAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrInvalidSession
 	}
 	if err != nil {
@@ -464,13 +605,17 @@ func (s *Storage) DeleteSession(ctx context.Context, id string) error {
 	return err
 }
 
-// LocalConfigRow is one row of the generic local_config key/value
-// table. See migration 005. `Synchronized` is true when this row's
-// value is meant to reach the cloud (e.g. station_id, api_key).
+// DeleteAllSessions signs every device out (used by PIN reset).
+func (s *Storage) DeleteAllSessions(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions`)
+	return err
+}
+
+// LocalConfigRow is one row of the local_config key/value table.
 type LocalConfigRow struct {
 	Key          string
 	Value        string
-	ConfigJSON   string // optional, "" when absent
+	ConfigJSON   string
 	Synchronized bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -485,7 +630,7 @@ func (s *Storage) GetLocalConfig(ctx context.Context, key string) (LocalConfigRo
 		SELECT key, value, config_json, synchronized, created_at, updated_at
 		FROM local_config WHERE key = ?
 	`, key).Scan(&r.Key, &r.Value, &cfgJSON, &syncFlag, &r.CreatedAt, &r.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}
 	if err != nil {
@@ -498,14 +643,22 @@ func (s *Storage) GetLocalConfig(ctx context.Context, key string) (LocalConfigRo
 	return r, nil
 }
 
-// SetLocalConfig upserts a key/value pair. Use ConfigJSON="" when no
-// structured companion is needed. Synchronized defaults to false.
+// LocalConfigValue returns the value for key, or def when absent.
+func (s *Storage) LocalConfigValue(ctx context.Context, key, def string) string {
+	row, err := s.GetLocalConfig(ctx, key)
+	if err != nil || row.Value == "" {
+		return def
+	}
+	return row.Value
+}
+
+// SetLocalConfig upserts a key/value pair.
 func (s *Storage) SetLocalConfig(ctx context.Context, key, value, configJSON string, synchronized bool) error {
 	syncFlag := 0
 	if synchronized {
 		syncFlag = 1
 	}
-	var cfgJSONArg any = nil
+	var cfgJSONArg any
 	if configJSON != "" {
 		cfgJSONArg = configJSON
 	}
@@ -521,18 +674,13 @@ func (s *Storage) SetLocalConfig(ctx context.Context, key, value, configJSON str
 	return err
 }
 
-// DeleteLocalConfig removes a row. Used by tests and by the rare
-// "reset station identity" runbook flow.
+// DeleteLocalConfig removes a row.
 func (s *Storage) DeleteLocalConfig(ctx context.Context, key string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM local_config WHERE key = ?`, key)
 	return err
 }
 
-// RecordSyncAttempt writes one row to sync_log. round_trip_ms is 0
-// when the request never reached a server (DNS, connection refused,
-// timeout). http_status is 0 when no HTTP response was received.
-// Reason is a short bounded category (timeout, http_4xx, http_5xx,
-// dns, parse) used by the dashboard to group failures.
+// RecordSyncAttempt writes one row to sync_log.
 func (s *Storage) RecordSyncAttempt(ctx context.Context, status, reason string, httpStatus, roundTripMs int) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO sync_log (status, reason, http_status, round_trip_ms)
@@ -541,8 +689,7 @@ func (s *Storage) RecordSyncAttempt(ctx context.Context, status, reason string, 
 	return err
 }
 
-// LatestSyncAttempt returns the most recent sync_log row, or
-// ErrNotFound if none yet.
+// SyncAttempt is one sync_log row.
 type SyncAttempt struct {
 	SentAt      time.Time
 	Status      string
@@ -551,6 +698,7 @@ type SyncAttempt struct {
 	RoundTripMs int
 }
 
+// LatestSyncAttempt returns the most recent sync_log row, or ErrNotFound.
 func (s *Storage) LatestSyncAttempt(ctx context.Context) (SyncAttempt, error) {
 	var a SyncAttempt
 	var reason sql.NullString
@@ -558,32 +706,19 @@ func (s *Storage) LatestSyncAttempt(ctx context.Context) (SyncAttempt, error) {
 		SELECT sent_at, status, reason, http_status, round_trip_ms
 		FROM sync_log ORDER BY id DESC LIMIT 1
 	`).Scan(&a.SentAt, &a.Status, &reason, &a.HTTPStatus, &a.RoundTripMs)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNotFound
 	}
 	if err != nil {
 		return a, err
 	}
-	if reason.Valid {
-		a.Reason = reason.String
-	}
+	a.Reason = reason.String
 	return a, nil
 }
 
-// DBSize returns the on-disk size of the SQLite database in MiB,
-// including WAL + SHM sidecars. Used by the heartbeat payload.
+// DBSize returns the logical size of the database in MiB.
 func (s *Storage) DBSize(ctx context.Context) (int64, error) {
-	// PRAGMA page_count * page_size gives us the logical size.
-	// For the heartbeat we want the physical (on-disk) size which
-	// includes WAL; the cleanest pure-Go path is stat-ing the
-	// main db file from PRAGMA database_list. But the simplest
-	// accurate answer is page_count * page_size — that's what
-	// the WAL contents would be flushed to at the next checkpoint,
-	// and it's good enough for the cloud's fleet-health dashboard.
 	var pageCount, pageSize int64
-	if _, err := s.db.ExecContext(ctx, `PRAGMA page_count`); err != nil {
-		return 0, err
-	}
 	if err := s.db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
 		return 0, err
 	}
@@ -593,82 +728,55 @@ func (s *Storage) DBSize(ctx context.Context) (int64, error) {
 	return (pageCount * pageSize) / (1024 * 1024), nil
 }
 
-// DiskFreeGB returns the free disk space in GiB on the volume holding
-// the database file. Used by the heartbeat payload to surface low-disk
-// stations in cloud admin.
-//
-// The path is persisted in local_config on first run so the storage
-// layer does not need to know its own path by design.
+// DiskFreeGB returns the free space in GiB on the volume holding the
+// database (platform-specific; see disk_*.go).
 func (s *Storage) DiskFreeGB(ctx context.Context) (int64, error) {
-	// Use the stored db path if present, otherwise fall back to ".".
-	dbPath := ""
-	if row, err := s.GetLocalConfig(ctx, "db_file_path"); err == nil {
-		dbPath = row.Value
-	}
-	if dbPath == "" {
-		dbPath = "."
-	}
-	// Get the directory of the database file.
-	dir := filepath.Dir(dbPath)
-	// Call GetDiskFreeSpaceEx to get free bytes available to the caller.
-	var freeBytesAvailable uint64
-	var totalNumberOfBytes uint64
-	var totalNumberOfFreeBytes uint64
-	err := windows.GetDiskFreeSpaceEx(
-		windows.StringToUTF16Ptr(dir),
-		&freeBytesAvailable,
-		&totalNumberOfBytes,
-		&totalNumberOfFreeBytes,
-	)
+	path, err := s.Path(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("storage: GetDiskFreeSpaceEx failed: %w", err)
-	}
-	// Convert bytes to GiB (1 GiB = 1024^3 bytes)
-	const gib = 1024 * 1024 * 1024
-	freeGB := int64(freeBytesAvailable / gib)
-	return freeGB, nil
-}
-
-// LastPosIngestionAt returns the timestamp of the most recent
-// successful POS ingestion (max ingestion_batch row's
-// ingested_at). Zero time when nothing has been ingested yet.
-func (s *Storage) LastPosIngestionAt(ctx context.Context) (time.Time, error) {
-	var ts sql.NullTime
-	err := s.db.QueryRowContext(ctx, `
-		SELECT MAX(ingested_at) FROM raw_pos_transactions
-	`).Scan(&ts)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if !ts.Valid {
-		return time.Time{}, nil
-	}
-	return ts.Time, nil
-}
-
-// ActiveAlertsCount returns the number of "alert"-severity issues
-// from the most recent station_health_score.issues_json. Counts
-// only entries with severity=alert (the kind that wake the owner
-// up at night); "warn" issues are tracked separately.
-func (s *Storage) ActiveAlertsCount(ctx context.Context) (int, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT issues_json FROM station_health_score
-		ORDER BY date DESC LIMIT 1
-	`)
-	var raw sql.NullString
-	if err := row.Scan(&raw); err != nil {
-		// sql.ErrNoRows is fine — no score yet means no alerts.
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, nil
-		}
 		return 0, err
 	}
-	if !raw.Valid || raw.String == "" {
+	dir := "."
+	if path != "" {
+		dir = filepath.Dir(path)
+	}
+	free, err := diskFreeBytes(dir)
+	if err != nil {
+		return 0, fmt.Errorf("storage: disk free: %w", err)
+	}
+	return int64(free / (1024 * 1024 * 1024)), nil
+}
+
+// LastPosIngestionAt returns when the most recent raw POS row arrived
+// (UTC). Zero time when nothing has been ingested yet.
+func (s *Storage) LastPosIngestionAt(ctx context.Context) (time.Time, error) {
+	var ts sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(received_at) FROM raw_pos_transactions`).Scan(&ts); err != nil {
+		return time.Time{}, err
+	}
+	if !ts.Valid || ts.String == "" {
+		return time.Time{}, nil
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339Nano, "2006-01-02T15:04:05Z"} {
+		if t, err := time.Parse(layout, ts.String); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("storage: unparseable received_at %q", ts.String)
+}
+
+// ActiveAlertsCount returns the number of severity=alert issues in the
+// most recent FuelMind Score.
+func (s *Storage) ActiveAlertsCount(ctx context.Context) (int, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT issues_json FROM station_health_score ORDER BY date DESC LIMIT 1
+	`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
-	// Parse and count alerts. We don't import the mart package
-	// here to avoid a cycle; the structure is stable enough to
-	// decode ad-hoc.
+	if err != nil {
+		return 0, err
+	}
 	var issues []struct {
 		Severity string `json:"severity"`
 	}
@@ -684,98 +792,44 @@ func (s *Storage) ActiveAlertsCount(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// ErrorsLast24h returns the number of error-level log entries
-// in the last 24 hours. The v1 log store is slog → stderr, so
-// we approximate by counting sync_log + raw_pos_transactions that
-// landed in failed/ via the raw layer's last-error hint column.
-//
-// For v1 we just return sync_log errors, which is good enough for
-// fleet-health alerting. A real production logger-backed count
-// is a Phase 9 add.
+// ErrorsLast24h counts failed sync attempts in the last 24 hours plus raw
+// rows that could not be normalized in that window.
 func (s *Storage) ErrorsLast24h(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM sync_log
-		WHERE status = 'failed' AND sent_at >= datetime('now', '-24 hours')
+		SELECT (SELECT COUNT(*) FROM sync_log
+		        WHERE status = 'failed' AND sent_at >= datetime('now', '-24 hours'))
+		     + (SELECT COUNT(*) FROM raw_normalize_errors
+		        WHERE last_attempt_at >= datetime('now', '-24 hours'))
 	`).Scan(&n)
+	return n, err
+}
+
+// UnresolvedProduct is a product name the POS used that has no alias.
+type UnresolvedProduct struct {
+	Alias string
+	Rows  int
+}
+
+// UnresolvedProducts lists product names in raw rows that could not be
+// normalized, most frequent first.
+func (s *Storage) UnresolvedProducts(ctx context.Context) ([]UnresolvedProduct, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(u.product_alias, ''), COUNT(*)
+		FROM raw_unresolved u
+		JOIN raw_normalize_errors e ON e.raw_transaction_id = u.id
+		GROUP BY 1 ORDER BY 2 DESC LIMIT 20`)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	return n, nil
-}
-
-// UpdateState tracks the state of an update process for a station.
-type UpdateState struct {
-	Status          string     // "checking" | "downloading" | "staged" | "awaiting_restart" | "probation" | "committed" | "rolled_back" | "failed"
-	Version         string
-	PreviousVersion string     // new field
-	Progress        int        // 0-100, meaningful now that downloads resume
-	ErrorMessage    string
-	StartedAt       time.Time
-	StagedAt        *time.Time // new
-	RestartedAt     *time.Time // new
-	CommittedAt     *time.Time // new
-	RollbackReason  string     // new
-	CompletedAt     sql.NullTime
-}
-
-// RecordUpdateState records or updates the update state for a station.
-// This is stored in local_config under the key "update_state_<version>"
-func (s *Storage) RecordUpdateState(ctx context.Context, version string, state UpdateState) error {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return fmt.Errorf("storage: marshal update state: %w", err)
+	defer rows.Close()
+	var out []UnresolvedProduct
+	for rows.Next() {
+		var p UnresolvedProduct
+		if err := rows.Scan(&p.Alias, &p.Rows); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
 	}
-	return s.SetLocalConfig(ctx, "update_state_"+version, string(data), "", false)
-}
-
-// GetUpdateState retrieves the update state for a station and version.
-// Returns ErrNotFound if no state is recorded.
-func (s *Storage) GetUpdateState(ctx context.Context, version string) (UpdateState, error) {
-	row, err := s.GetLocalConfig(ctx, "update_state_"+version)
-	if err != nil {
-		return UpdateState{}, err
-	}
-	var state UpdateState
-	if err := json.Unmarshal([]byte(row.Value), &state); err != nil {
-		return UpdateState{}, fmt.Errorf("storage: unmarshal update state: %w", err)
-	}
-	return state, nil
-}
-
-// DeleteUpdateState removes the update state for a station and version.
-func (s *Storage) DeleteUpdateState(ctx context.Context, version string) error {
-	return s.DeleteLocalConfig(ctx, "update_state_"+version)
-}
-
-// RecordAppliedUpdate records that an update was successfully applied.
-// This is stored in the update_history table via the cloud, but we also
-// keep a local record for quick lookup.
-func (s *Storage) RecordAppliedUpdate(ctx context.Context, version string) error {
-	state := UpdateState{
-		Status:       "applied",
-		Progress:     100,
-		StartedAt:    time.Now(),
-		CompletedAt:  sql.NullTime{Time: time.Now(), Valid: true},
-	}
-	return s.RecordUpdateState(ctx, version, state)
-}
-
-// RecordFailedUpdate records that an update failed.
-func (s *Storage) RecordFailedUpdate(ctx context.Context, version string, errMsg string) error {
-	state := UpdateState{
-		Status:       "failed",
-		Progress:     0,
-		ErrorMessage: errMsg,
-		StartedAt:    time.Now(),
-		CompletedAt:  sql.NullTime{Time: time.Now(), Valid: true},
-	}
-	return s.RecordUpdateState(ctx, version, state)
-}
-
-// FinishInFlightWork signals that any in-flight work (ingestion, materialization)
-// should be allowed to complete before a restart. For v1 it's a no-op.
-func (s *Storage) FinishInFlightWork() error {
-	// No-op for v1.
-	return nil
+	return out, rows.Err()
 }

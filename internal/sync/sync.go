@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/fuelmind/fuelmind/internal/ident"
+	"github.com/fuelmind/fuelmind/internal/launcher"
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
 
@@ -59,28 +60,57 @@ const HTTPClientTimeout = 10 * time.Second
 
 // LastRollbackInfo carries the version / reason / timestamp of a
 // previously failed update attempt, so the cloud can surface it in
-// fleet‑health views.
+// fleet-health views.
 type LastRollbackInfo struct {
-	Version    string    `json:"version"`
-	Reason     string    `json:"reason"`
-	At         string    `json:"at"` // RFC3339 / ISO8601
+	Version string `json:"version"`
+	Reason  string `json:"reason"`
+	At      string `json:"at"` // RFC 3339
 }
 
-// HeartbeatPayload is the spec §6.3 payload the local core sends.
-// No financial detail — only enough to drive a fleet-health view.
+// HeartbeatPayload is the spec §6.3 payload the local core sends. No
+// financial detail. The health fields are only sent when the owner
+// opted in at setup (TelemetryConsent); otherwise the heartbeat is the
+// bare licensing check: station id, software version, timestamp.
 type HeartbeatPayload struct {
-	StationID            string          `json:"station_id"`
-	SoftwareVersion      string          `json:"software_version"`
-	HardwareTier         string          `json:"hardware_tier"`
-	Timestamp            time.Time       `json:"timestamp"`
-	DatabaseSizeMB       int64           `json:"database_size_mb"`
-	DataHealthScore      int             `json:"data_health_score"`
-	LastPosIngestionAt   time.Time       `json:"last_pos_ingestion_at"`
-	ActiveAlertsCount    int             `json:"active_alerts_count"`
-	DiskFreeGB           int64           `json:"disk_free_gb"`
-	AppUptimeHours       int64           `json:"app_uptime_hours"`
-	ErrorsLast24h        int             `json:"errors_last_24h"`
-	LastRollback         *LastRollbackInfo `json:"last_rollback,omitempty"`
+	StationID          string            `json:"station_id"`
+	SoftwareVersion    string            `json:"software_version"`
+	Timestamp          time.Time         `json:"timestamp"`
+	TelemetryConsent   bool              `json:"telemetry_consent"`
+	LastRollback       *LastRollbackInfo `json:"last_rollback,omitempty"`
+	HardwareTier       string            `json:"hardware_tier"`
+	DatabaseSizeMB     int64             `json:"database_size_mb"`
+	DataHealthScore    int               `json:"data_health_score"`
+	LastPosIngestionAt time.Time         `json:"last_pos_ingestion_at"`
+	ActiveAlertsCount  int               `json:"active_alerts_count"`
+	DiskFreeGB         int64             `json:"disk_free_gb"`
+	AppUptimeHours     int64             `json:"app_uptime_hours"`
+	ErrorsLast24h      int               `json:"errors_last_24h"`
+}
+
+// MarshalJSON drops every health field when telemetry consent is off.
+func (p HeartbeatPayload) MarshalJSON() ([]byte, error) {
+	type full HeartbeatPayload
+	if p.TelemetryConsent {
+		return json.Marshal(full(p))
+	}
+	return json.Marshal(struct {
+		StationID        string            `json:"station_id"`
+		SoftwareVersion  string            `json:"software_version"`
+		Timestamp        time.Time         `json:"timestamp"`
+		TelemetryConsent bool              `json:"telemetry_consent"`
+		LastRollback     *LastRollbackInfo `json:"last_rollback,omitempty"`
+	}{p.StationID, p.SoftwareVersion, p.Timestamp, false, p.LastRollback})
+}
+
+// ConfigKeyTelemetryConsent is the local_config key written by /setup.
+const ConfigKeyTelemetryConsent = "telemetry_consent"
+
+// ConfigKeyLastRollback holds a rollback record waiting to be reported.
+const ConfigKeyLastRollback = "last_rollback"
+
+// LicenseTier returns the cached license tier ("private" when unknown).
+func LicenseTier(ctx context.Context, store *storage.Storage) string {
+	return store.LocalConfigValue(ctx, ident.ConfigKeyLicenseCache, "private")
 }
 
 // LicenseStatus is what the cloud returns from /v1/license/{station_id}
@@ -137,7 +167,7 @@ type httpDoer struct {
 // without a trailing slash.
 func NewHTTPClient(baseURL string) CloudClient {
 	return &httpDoer{
-		baseURL: baseURL,
+		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    &http.Client{Timeout: HTTPClientTimeout},
 	}
 }
@@ -339,16 +369,18 @@ func jitter(d time.Duration, fraction float64) time.Duration {
 
 // tick builds the payload, calls the cloud, records the outcome.
 // All errors are non-fatal; the loop just moves on to the next tick.
-func (a *Agent) tick(ctx context.Context) {
+func (a *Agent) tick(ctx context.Context) { _ = a.SendOnce(ctx) }
+
+// SendOnce sends one heartbeat now and records the outcome in sync_log.
+// Used by the loop and by `fuelmind-setup test-heartbeat`.
+func (a *Agent) SendOnce(ctx context.Context) error {
+	if a.StartedAt.IsZero() {
+		a.StartedAt = time.Now()
+	}
 	payload, err := a.buildPayload(ctx)
 	if err != nil {
-		// Building the payload itself shouldn't fail — but if it
-		// does (e.g. storage read failed), log it and skip this
-		// cycle. Don't write a sync_log row for "we couldn't
-		// even try" — those are local failures, not sync
-		// failures.
 		a.logger.Warn("sync: build payload", "err", err)
-		return
+		return err
 	}
 
 	lic, err := a.client.PostHeartbeat(ctx, a.identity.StationID, a.identity.APIKey, payload)
@@ -375,12 +407,18 @@ func (a *Agent) tick(ctx context.Context) {
 			"round_trip_ms", roundTripMs,
 			"station_id", a.identity.StationID.String(),
 		)
-		return
+		return err
 	}
 
 	// Success: persist the license cache + record the attempt.
 	if err := a.persistLicense(ctx, lic); err != nil {
 		a.logger.Warn("sync: persist license cache", "err", err)
+	}
+	// A reported rollback has reached the cloud; don't report it again.
+	if payload.LastRollback != nil {
+		if err := a.store.DeleteLocalConfig(ctx, ConfigKeyLastRollback); err != nil {
+			a.logger.Warn("sync: clear reported rollback", "err", err)
+		}
 	}
 	// We don't have round_trip_ms here (it's inside the client's
 	// SyncError envelope) — record 0 for success rows, which is
@@ -392,6 +430,7 @@ func (a *Agent) tick(ctx context.Context) {
 		"station_id", a.identity.StationID.String(),
 		"license_tier", lic.Tier,
 	)
+	return nil
 }
 
 // buildPayload gathers the spec §6.3 fields. Returns an error only
@@ -409,36 +448,30 @@ func (a *Agent) buildPayload(ctx context.Context) (*HeartbeatPayload, error) {
 	alertCount, _ := a.store.ActiveAlertsCount(ctx)
 	errCount, _ := a.store.ErrorsLast24h(ctx)
 
-	// Load any pending rollback report from local_config so the cloud can
-	// surface it in fleet‑health views.
+	// A rollback recorded by the launcher waits in local_config until a
+	// heartbeat delivers it.
 	var lastRollback *LastRollbackInfo
-	if raw, err := a.store.GetLocalConfig(ctx, "last_rollback"); err == nil && raw.Value != "" {
-		var info LastRollbackInfo
-		if err := json.Unmarshal([]byte(raw.Value), &info); err == nil {
-			// Store the timestamp as a string to avoid timezone issues in JSON.
-			info.At = time.Now().UTC().Format(time.RFC3339) // placeholder, will be replaced below
-			// Actually, we stored the raw value from the launcher which is JSON with time.Time.
-			// The launcher's RollbackRecord.At is a time.Time, marshaled to JSON by
-			// launcher.writeRollbackRecord, then stored as a string by SetLocalConfig.
-			// So we should unmarshal that string directly into LastRollbackInfo.
-			// We already did that above with Unmarshal, but we overwrote At.
-			// Let's redo: unmarshal the raw value into info.
-			if err := json.Unmarshal([]byte(raw.Value), &info); err != nil {
-				// If unmarshal fails, just skip adding the rollback info.
-				a.logger.Warn("sync: failed to unmarshal last_rollback", "err", err)
-			} else {
-				lastRollback = &info
+	if raw := a.store.LocalConfigValue(ctx, ConfigKeyLastRollback, ""); raw != "" {
+		var rec launcher.RollbackRecord
+		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+			a.logger.Warn("sync: unreadable last_rollback record", "err", err)
+		} else {
+			lastRollback = &LastRollbackInfo{
+				Version: rec.FailedVersion,
+				Reason:  rec.Reason,
+				At:      rec.At.UTC().Format(time.RFC3339),
 			}
 		}
 	}
-
+	consent := a.store.LocalConfigValue(ctx, ConfigKeyTelemetryConsent, "false") == "true"
 	return &HeartbeatPayload{
 		StationID:          a.identity.StationID.String(),
 		SoftwareVersion:    a.SoftwareVersion,
 		HardwareTier:       hwTier,
 		Timestamp:          time.Now().UTC(),
+		TelemetryConsent:   consent,
 		DatabaseSizeMB:     dbSize,
-		DataHealthScore:    a.dataHealthScore(),
+		DataHealthScore:    a.dataHealthScore(ctx),
 		LastPosIngestionAt: lastIngest,
 		ActiveAlertsCount:  alertCount,
 		DiskFreeGB:         diskFree,
@@ -450,8 +483,8 @@ func (a *Agent) buildPayload(ctx context.Context) (*HeartbeatPayload, error) {
 
 // dataHealthScore returns the most recent FuelMind Score, or 0 if
 // none yet. Cheap to read — it's already in the mart.
-func (a *Agent) dataHealthScore() int {
-	s, err := a.store.LatestScore(context.Background())
+func (a *Agent) dataHealthScore(ctx context.Context) int {
+	s, err := a.store.LatestScore(ctx)
 	if err != nil {
 		return 0
 	}

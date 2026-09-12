@@ -1,10 +1,18 @@
 {{define "body"}}
 <div class="page">
   <h1>Today</h1>
-  <p class="muted">{{.Totals.Date}}</p>
+  <p class="muted">{{formatDate .Totals.Date}}</p>
+
+  {{if .Unresolved}}
+  <div class="notice" role="status">
+    Some POS rows could not be read because FuelMind doesn't recognise the product name:
+    {{range $i, $p := .Unresolved}}{{if $i}}, {{end}}<code>{{$p.Alias}}</code> ({{$p.Rows}}){{end}}.
+    Send these names to FuelMind support so they can be added; the rows are kept and will appear once they are.
+  </div>
+  {{end}}
 
   {{if gt .Totals.TransactionCount 0}}
-  <section class="cards">
+  <section class="cards" aria-label="Today's totals">
     <div class="card">
       <div class="label">Revenue</div>
       <div class="big">{{formatMoney .Totals.Revenue}}</div>
@@ -14,7 +22,7 @@
       <div class="big">{{formatLiters .Totals.VolumeLiters}}</div>
     </div>
     <div class="card">
-      <div class="label">Transactions</div>
+      <div class="label">Sales</div>
       <div class="big">{{.Totals.TransactionCount}}</div>
     </div>
     <div class="card">
@@ -24,19 +32,32 @@
   </section>
   {{else}}
   <section class="empty-state">
-    <p class="muted">No transactions recorded today yet.</p>
+    <p class="muted">No sales recorded today yet.</p>
   </section>
   {{end}}
 
-  {{if .Score.Date}}
+  <section class="ask" aria-label="Ask about your station">
+    <h2>Ask</h2>
+    <form method="post" action="/ask">
+      <label for="q" class="sr-only">Question</label>
+      <input type="text" id="q" name="q" maxlength="300" placeholder="e.g. How much did we sell today?" value="{{.Question}}">
+      <button type="submit">Ask</button>
+    </form>
+    {{if .Answer}}
+    <div class="answer" role="status">
+      <p class="q">{{.Question}}</p>
+      <p>{{.Answer}}</p>
+    </div>
+    {{end}}
+  </section>
+
   <section>
-    <h2>FuelMind Score</h2>
+    <h2>FuelMind Score {{if and .Score.Date (not .ScoreIsToday)}}<span class="score-date">(latest: {{formatDate .Score.Date}})</span>{{end}}</h2>
+    {{if .Score.Date}}
     <div class="score">
       <div class="score-num">{{.Score.Overall}}</div>
       <div class="score-meta">
         <span>Sales {{.Score.Sales}}</span>
-        <span>Inv <small class="muted">(unmeasured)</small></span>
-        <span>Cash <small class="muted">(unmeasured)</small></span>
         <span>Credit {{.Score.Credit}}</span>
         <span>Data {{.Score.DataQuality}}</span>
         <span>Ops {{.Score.Operations}}</span>
@@ -46,26 +67,18 @@
     <ul class="issues">
       {{range .Issues}}
       <li class="issue {{severityClass .severity}}">
-        <!-- Accessibility: Add icon before text for screen readers -->
-        <span class="issue-icon {{.severity}}" aria-hidden="true">
-          {{if eq .severity "alert"}}⚠{{else if eq .severity "warn"}}⚠{{else}}ℹ{{end}}
-        </span>
         <span class="badge">{{.severity}}</span>
-        <span class="code">{{.code}}</span>
         <span class="msg">{{.message}}</span>
       </li>
       {{end}}
     </ul>
     {{else}}
-    <p class="muted small">No issues today.</p>
+    <p class="muted small">No issues.</p>
+    {{end}}
+    {{else}}
+    <p class="muted">No score yet. It appears as soon as the first POS file is processed.</p>
     {{end}}
   </section>
-  {{else}}
-  <section>
-    <h2>FuelMind Score</h2>
-    <p class="muted">No score yet. Once today's data is in, the score appears here within 15 minutes (or immediately after the next POS file is processed).</p>
-  </section>
-  {{end}}
 </div>
 {{end}}
 {{template "base" .}}

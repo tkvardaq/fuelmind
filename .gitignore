@@ -34,3 +34,7 @@ Thumbs.db
 /vendor/
 coverage.txt
 coverage.html
+installer/*.msi
+installer/*.wixobj
+installer/*.wixpdb
+*.log

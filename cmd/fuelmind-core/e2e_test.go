@@ -87,6 +87,7 @@ func TestFullSystemE2E(t *testing.T) {
 	form.Set("pin_confirm", "strongpin123")
 	w = httptest.NewRecorder()
 	r = httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
+	r.RemoteAddr = "127.0.0.1:50000"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusFound {
@@ -106,6 +107,7 @@ func TestFullSystemE2E(t *testing.T) {
 	// Step C: Setup bypass attempt blocked
 	w = httptest.NewRecorder()
 	r = httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
+	r.RemoteAddr = "127.0.0.1:50000"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {

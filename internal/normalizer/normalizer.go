@@ -4,16 +4,11 @@
 // CSV's string columns become typed numbers.
 //
 // Per spec §2.3, this is Layer 2 of the three-layer data model.
-// Everything above the mart is read from the result of this
-// normalizer; nothing in the LLM or dashboard ever sees raw POS
-// quirks.
-//
-// The normalizer is intentionally simple in v1: a literal-string
-// alias lookup. Fuzzy / embedding-based alias matching is v1.1.
 //
 // Idempotency: a row in `transactions` UNIQUEly references a
-// `raw_transaction_id`, so re-running on the same raw rows is a
-// no-op. The Watcher calls this after every ingestion batch.
+// `raw_transaction_id`, and (pos_source_id, external_id) is unique, so
+// re-running on the same raw rows — or on a re-export of the same POS
+// transactions — never double-counts.
 package normalizer
 
 import (
@@ -29,9 +24,8 @@ import (
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
 
-// paymentMethods we accept. Anything else is preserved as-is (lowercased,
-// trimmed) and a warning is logged — we don't reject the row because
-// we want the owner to see the data, not lose it.
+// knownPaymentMethods we accept. Anything else is preserved (upper-cased,
+// trimmed) and a warning is logged — we want the owner to see the data.
 var knownPaymentMethods = map[string]struct{}{
 	"CASH":          {},
 	"CARD":          {},
@@ -39,36 +33,58 @@ var knownPaymentMethods = map[string]struct{}{
 	"MOBILE_WALLET": {},
 }
 
-// Normalizer is the conversion pipeline. Holds an in-memory alias map
-// and a logger. One per Storage.
+// Data-quality flags stored on accepted rows.
+const (
+	FlagTotalMismatch    = "total_mismatch"
+	FlagNegativeQuantity = "negative_quantity"
+)
+
+// Normalizer is the conversion pipeline.
 type Normalizer struct {
 	store   *storage.Storage
 	aliases map[string]string
 	logger  *slog.Logger
+	loc     *time.Location
 }
 
-// New builds a normalizer and eagerly loads the alias map. If the
-// alias table is empty the normalizer still works — every alias
-// lookup will fail and the row will be marked unresolvable.
+// New builds a normalizer. Timestamps are converted to the station's
+// local time zone (time.Local) so the mart buckets sales by the
+// station's business day regardless of how the POS writes offsets.
 func New(store *storage.Storage, logger *slog.Logger) (*Normalizer, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	aliases, err := store.ProductAliases(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("normalizer: load aliases: %w", err)
+	n := &Normalizer{store: store, logger: logger, loc: time.Local}
+	if err := n.reloadAliases(context.Background()); err != nil {
+		return nil, err
 	}
-	return &Normalizer{store: store, aliases: aliases, logger: logger}, nil
+	return n, nil
 }
 
-// Run processes up to `limit` un-normalized rows (0 = no limit). It
-// is safe to call repeatedly; each call processes new rows only
-// (the WHERE t.id IS NULL clause excludes already-normalized ones).
-//
-// Returns the number of rows successfully written. Rows that fail
-// (bad alias, bad decimal, etc.) are counted as errors and reported
-// in the log; they are NOT written, so the next call retries them.
-func (n *Normalizer) Run(ctx context.Context, limit int) (processed, errors int, err error) {
+func (n *Normalizer) reloadAliases(ctx context.Context) error {
+	aliases, err := n.store.ProductAliases(ctx)
+	if err != nil {
+		return fmt.Errorf("normalizer: load aliases: %w", err)
+	}
+	lower := make(map[string]string, len(aliases)*2)
+	for k, v := range aliases {
+		lower[k] = v
+		lower[strings.ToLower(k)] = v
+	}
+	n.aliases = lower
+	return nil
+}
+
+// Run processes up to `limit` un-normalized rows (0 = no limit). Rows that
+// fail (unknown alias, bad decimal, …) are recorded in
+// raw_normalize_errors and retried on the next run, so adding a missing
+// alias heals them. Each failure is logged once.
+func (n *Normalizer) Run(ctx context.Context, limit int) (processed, errs int, err error) {
+	// Aliases are cheap to reload and this lets a newly added alias take
+	// effect without restarting the service.
+	if err := n.reloadAliases(ctx); err != nil {
+		return 0, 0, err
+	}
 	rows, err := n.store.UnnormalizedTransactions(ctx, limit)
 	if err != nil {
 		return 0, 0, fmt.Errorf("normalizer: query: %w", err)
@@ -76,48 +92,46 @@ func (n *Normalizer) Run(ctx context.Context, limit int) (processed, errors int,
 	for _, r := range rows {
 		nrow, nerr := n.normalizeRow(r)
 		if nerr != nil {
-			n.logger.Warn("normalize row failed",
-				"raw_id", r.ID, "err", nerr)
-			errors++
+			errs++
+			first, rerr := n.store.RecordNormalizeError(ctx, r.ID, nerr.Error())
+			if rerr != nil {
+				return processed, errs, rerr
+			}
+			if first {
+				n.logger.Warn("normalize row failed", "raw_id", r.ID, "err", nerr)
+			}
 			continue
 		}
-		if werr := n.store.WriteNormalizedTransaction(ctx, nrow); werr != nil {
-			return processed, errors, fmt.Errorf("normalizer: write: %w", werr)
+		replaced, werr := n.store.WriteNormalizedTransaction(ctx, nrow)
+		if werr != nil {
+			return processed, errs, fmt.Errorf("normalizer: write: %w", werr)
+		}
+		if replaced {
+			n.logger.Info("POS re-exported a transaction; replaced the earlier copy",
+				"pos_source_id", nrow.PosSourceID, "external_id", nrow.ExternalID)
 		}
 		processed++
 	}
-	return processed, errors, nil
+	return processed, errs, nil
 }
 
-// csvRow is the on-the-wire shape csvwatch produced. The normalizer
-// is the only consumer of this struct; if csvwatch changes, the
-// normalizer must change in lockstep.
+// csvRow is the on-the-wire shape csvwatch produced.
 type csvRow map[string]string
 
-// normalizeRow is the per-row work. It is exported (within the
-// package) for testing.
 func (n *Normalizer) normalizeRow(r storage.RawTransaction) (storage.NormalizedTransaction, error) {
 	var row csvRow
 	if err := json.Unmarshal([]byte(r.RawPayload), &row); err != nil {
 		return storage.NormalizedTransaction{}, fmt.Errorf("payload is not JSON: %w", err)
 	}
 
-	// 1. Resolve product alias.
+	// 1. Resolve product alias (exact, then case-insensitive).
 	alias := strings.TrimSpace(row["product_alias"])
 	code, ok := n.aliases[alias]
 	if !ok {
-		// Try case-insensitive fallback. Most POSes write in
-		// uppercase, but Excel exports can shift case.
-		for k, v := range n.aliases {
-			if strings.EqualFold(k, alias) {
-				code = v
-				ok = true
-				break
-			}
-		}
+		code, ok = n.aliases[strings.ToLower(alias)]
 	}
 	if !ok {
-		return storage.NormalizedTransaction{}, fmt.Errorf("unresolved product alias %q (add a row to product_aliases)", alias)
+		return storage.NormalizedTransaction{}, fmt.Errorf("unknown product %q (add it to product_aliases)", alias)
 	}
 
 	// 2. Parse decimals.
@@ -134,29 +148,32 @@ func (n *Normalizer) normalizeRow(r storage.RawTransaction) (storage.NormalizedT
 		return storage.NormalizedTransaction{}, fmt.Errorf("total_amount: %w", err)
 	}
 
-	// 3. Validate payment method.
-	pay := strings.ToUpper(strings.TrimSpace(row["payment_method"]))
-	if _, known := knownPaymentMethods[pay]; !known {
-		n.logger.Warn("unknown payment_method, preserving as-is",
-			"raw_id", r.ID, "value", pay)
+	// 3. Data-quality flags. The POS total is kept as the revenue figure
+	//    (it is what the customer paid) but inconsistencies are flagged.
+	var flags []string
+	if !amountsAgree(qty, price, total) {
+		flags = append(flags, FlagTotalMismatch)
+	}
+	if qty < 0 {
+		flags = append(flags, FlagNegativeQuantity)
 	}
 
-	// 4. Parse the transaction timestamp. The raw payload's
-	//    occurred_at is what the POS said, not received_at
-	//    (the file-drop time).
-	txTime := strings.TrimSpace(row["occurred_at"])
-	if _, err := time.Parse(time.RFC3339, txTime); err == nil {
-		// Good: full RFC 3339. Keep as-is.
-	} else if t, err := time.ParseInLocation("2006-01-02T15:04:05", txTime, time.Local); err == nil {
-		txTime = t.Format(time.RFC3339)
-	} else if t, err := time.ParseInLocation("2006-01-02 15:04:05", txTime, time.Local); err == nil {
-		txTime = t.Format(time.RFC3339)
-	} else {
-		return storage.NormalizedTransaction{}, fmt.Errorf("occurred_at: unparseable %q", txTime)
+	// 4. Payment method.
+	pay := strings.ToUpper(strings.TrimSpace(row["payment_method"]))
+	if _, known := knownPaymentMethods[pay]; !known {
+		n.logger.Warn("unknown payment_method, preserving as-is", "raw_id", r.ID, "value", pay)
+	}
+
+	// 5. Timestamp → station-local RFC 3339.
+	t, err := ParseTimestamp(strings.TrimSpace(row["occurred_at"]), n.loc)
+	if err != nil {
+		return storage.NormalizedTransaction{}, fmt.Errorf("occurred_at: %w", err)
 	}
 
 	return storage.NormalizedTransaction{
 		RawTransactionID: r.ID,
+		PosSourceID:      r.PosSourceID,
+		ExternalID:       strings.TrimSpace(row["external_id"]),
 		ProductCode:      code,
 		QuantityLiters:   qty,
 		UnitPrice:        price,
@@ -165,19 +182,43 @@ func (n *Normalizer) normalizeRow(r storage.RawTransaction) (storage.NormalizedT
 		CustomerPhone:    strings.TrimSpace(row["customer_phone"]),
 		PumpID:           strings.TrimSpace(row["pump_id"]),
 		Attendant:        strings.TrimSpace(row["attendant"]),
-		TransactionTime:  txTime,
+		TransactionTime:  t.In(n.loc).Format(time.RFC3339),
+		Flags:            strings.Join(flags, ","),
 	}, nil
 }
 
-// parseDecimal accepts "12.5", "12.500", "1,234.56", and "1,234,567.89"
-// (thousands comma separators). Regional POSes in PK often emit
-// comma-separated values, and "1,234.56 PKR" is a common Excel export.
+// amountsAgree reports whether total ≈ quantity × price, allowing for
+// POS rounding (1 currency unit or 0.5%, whichever is larger).
+func amountsAgree(qty, price, total float64) bool {
+	want := qty * price
+	tol := math.Max(1.0, math.Abs(total)*0.005)
+	return math.Abs(want-total) <= tol
+}
+
+// ParseTimestamp accepts RFC 3339 (with zone) and the naive forms
+// "2006-01-02T15:04:05" / "2006-01-02 15:04:05", which are interpreted
+// in loc (the station's time zone).
+func ParseTimestamp(s string, loc *time.Location) (time.Time, error) {
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty timestamp")
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, s, loc); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unparseable %q", s)
+}
+
+// parseDecimal accepts "12.5", "1,234.56" (thousands separators).
 func parseDecimal(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, fmt.Errorf("empty decimal string")
 	}
-	// Strip thousands-separator commas
 	s = strings.ReplaceAll(s, ",", "")
 	val, err := strconv.ParseFloat(s, 64)
 	if err != nil {

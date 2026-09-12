@@ -62,6 +62,7 @@ func TestSetupPageRenders(t *testing.T) {
 	srv, _, _ := newTestServer(t)
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/setup", nil)
+	r.RemoteAddr = "127.0.0.1:50000"
 	srv.Routes().ServeHTTP(w, r)
 	if w.Code != 200 {
 		t.Errorf("status = %d, want 200", w.Code)
@@ -93,6 +94,7 @@ func TestFullFlow_SetupLoginDashboard(t *testing.T) {
 	// 1. POST /setup with matching PINs.
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
+	r.RemoteAddr = "127.0.0.1:50000"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Routes().ServeHTTP(w, r)
 	if w.Code != http.StatusFound {
@@ -161,8 +163,8 @@ func TestSalesPageRendersEmpty(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("status = %d, want 200", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "No sales data yet") {
-		t.Error("empty sales page missing 'No sales data yet' message")
+	if !strings.Contains(w.Body.String(), "No sales in the last 30 days yet") {
+		t.Error("empty sales page missing its empty-state message")
 	}
 }
 
@@ -222,6 +224,7 @@ func TestSetupBypassBlockedWhenPINSet(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/setup", strings.NewReader(form.Encode()))
+	r.RemoteAddr = "127.0.0.1:50000"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	srv.Routes().ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {

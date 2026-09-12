@@ -46,6 +46,7 @@ func sampleContext() MartContext {
 		CreditOutstanding: 50000.00,
 		CreditCustomers:   3,
 		OverallScore:      82,
+		ScoreDate:         "2026-09-08",
 		OpenIssues:        []string{"low_transaction_count"},
 		TopProducts: []ProductRow{
 			{Code: "DIESEL", Volume: 800, Money: 70000},
@@ -63,7 +64,7 @@ func TestRouter_StandardPath_TodayRevenue(t *testing.T) {
 	if path != "standard" {
 		t.Errorf("path = %q, want standard", path)
 	}
-	if !strings.Contains(ans, "125000.50") {
+	if !strings.Contains(ans, "125,000.50") {
 		t.Errorf("answer = %q, want it to contain today's revenue", ans)
 	}
 }
@@ -77,7 +78,7 @@ func TestRouter_StandardPath_CreditOutstanding(t *testing.T) {
 	if path != "standard" {
 		t.Errorf("path = %q, want standard", path)
 	}
-	if !strings.Contains(ans, "50000.00") {
+	if !strings.Contains(ans, "50,000.00") {
 		t.Errorf("answer = %q, want it to contain outstanding amount", ans)
 	}
 	if !strings.Contains(ans, "3") {
@@ -119,7 +120,7 @@ func TestRouter_BasicTierRefusesLLM(t *testing.T) {
 }
 
 func TestRouter_StandardTierCallsLLM(t *testing.T) {
-	fc := &fakeClient{reply: "Profit fell because volume dropped 12% week-over-week."}
+	fc := &fakeClient{reply: "Revenue today is 125000.50 PKR against 110000.00 PKR yesterday."}
 	r := NewRouter(fc, TierStandard)
 	ans, path, err := r.Route(context.Background(), "why did profit fall this week?", sampleContext())
 	if err != nil {
@@ -170,5 +171,66 @@ func TestRouter_EmptyQuestion(t *testing.T) {
 	}
 	if ans == "" {
 		t.Error("answer = empty, want a polite default")
+	}
+}
+
+func TestRouter_RejectsInventedNumbers(t *testing.T) {
+	fc := &fakeClient{reply: "Profit fell because volume dropped 12% week-over-week."}
+	r := NewRouter(fc, TierStandard)
+	ans, path, err := r.Route(context.Background(), "why did profit fall this week?", sampleContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != "llm-rejected" {
+		t.Errorf("path = %q, want llm-rejected (12%% is not in the context)", path)
+	}
+	if strings.Contains(ans, "12") {
+		t.Errorf("invented number leaked to the owner: %q", ans)
+	}
+}
+
+// Questions the deterministic paths used to answer with an unrelated
+// figure (review probe). None may produce a revenue or credit number.
+func TestRouter_DoesNotMisroute(t *testing.T) {
+	r := NewRouter(&fakeClient{err: errors.New("no llm")}, TierBasic)
+	for _, q := range []string{
+		"How many liters of diesel did we sell last month?",
+		"What is the price of petrol 95?",
+		"Is the credit card machine working?",
+		"What was the health of tank 2 last week?",
+		"Total cash in the drawer?",
+	} {
+		ans, _, _ := r.Route(context.Background(), q, sampleContext())
+		for _, leak := range []string{"125,000", "50,000", "1,450"} {
+			if strings.Contains(ans, leak) {
+				t.Errorf("%q -> %q (unrelated figure %s)", q, ans, leak)
+			}
+		}
+	}
+}
+
+func TestRouter_ProductAndPeriods(t *testing.T) {
+	r := NewRouter(&fakeClient{}, TierBasic)
+	cases := map[string]string{
+		"how much diesel did we sell today?": "800.00 L",
+		"sales yesterday":                    "110,000.00",
+		"revenue over the last 7 days":       "Over the last 7 days",
+		"how much petrol 95 today":           "No Petrol 95 sales",
+	}
+	for q, want := range cases {
+		ans, path, _ := r.Route(context.Background(), q, sampleContext())
+		if path != "standard" || !strings.Contains(ans, want) {
+			t.Errorf("%q -> [%s] %q, want it to contain %q", q, path, ans, want)
+		}
+	}
+}
+
+func TestUngroundedNumbers(t *testing.T) {
+	prompt := "Revenue today: 125000.50 PKR from 12 sales"
+	if bad := ungroundedNumbers("Revenue is 125,000.50 (about 125,001) from 12 sales.", prompt); len(bad) != 0 {
+		t.Errorf("grounded numbers rejected: %v", bad)
+	}
+	if bad := ungroundedNumbers("That is 14% up.", prompt); len(bad) != 1 {
+		t.Errorf("invented number not caught: %v", bad)
 	}
 }

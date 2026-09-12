@@ -6,11 +6,11 @@
   <form method="post" action="/login">
     <div>
       <label for="pin-input" class="sr-only">PIN</label>
-      <input type="password" id="pin-input" name="pin" autofocus autocomplete="off" placeholder="PIN">
+      <input type="password" id="pin-input" name="pin" autofocus autocomplete="current-password" placeholder="PIN" required>
     </div>
     <button type="submit">Log in</button>
   </form>
-  <p class="muted small">First time? <a href="/setup">Set up a PIN</a>.</p>
+  <p class="muted small">Forgot the PIN? On the shop PC, run <code>fuelmind-setup reset-pin</code> as administrator.</p>
 </div>
 {{end}}
 {{template "base" .}}

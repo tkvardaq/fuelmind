@@ -1,33 +1,35 @@
 {{define "body"}}
 <div class="page">
   <h1>Credit outstanding</h1>
-  <p class="muted">Top 50 customers with outstanding balances.</p>
+  <p class="muted">Customers who bought on credit, largest balance first{{if .AsOf}} &middot; as of {{formatDate .AsOf}}{{end}}. Balances are the total of credit sales; payments are not tracked yet.</p>
 
   {{if .Rows}}
+  <div class="table-wrap">
   <table class="data">
     <thead>
       <tr>
-        <th>Customer</th>
+        <th>Customer phone</th>
         <th class="num">Outstanding</th>
-        <th class="num">Days overdue</th>
-        <th>Last payment</th>
-      </th>
+        <th class="num">Credit sales</th>
+        <th class="num">Days since last credit sale</th>
+      </tr>
     </thead>
     <tbody>
       {{range .Rows}}
       <tr>
-        <td>{{.CustomerName}}</td>
+        <td>{{.CustomerPhone}}</td>
         <td class="num">{{formatMoney .OutstandingAmount}}</td>
+        <td class="num">{{.TransactionCount}}</td>
         <td class="num">{{.DaysOverdue}}</td>
-        <td>{{formatDate .LastPaymentDate}}</td>
       </tr>
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <div class="empty-state">
-    <p class="muted">No credit data yet.</p>
-    <p class="muted small">Credit outstanding appears when customers make purchases on account.</p>
+    <p class="muted">No credit sales yet.</p>
+    <p class="muted small">Customers appear here when the POS records a CREDIT sale with a customer phone number.</p>
   </div>
   {{end}}
 </div>

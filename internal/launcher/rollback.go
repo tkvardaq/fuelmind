@@ -7,10 +7,17 @@ import (
 	"time"
 )
 
+// RollbackRecord is written by the launcher when it rolls back a version
+// and read by the core, which forwards it to the cloud in the next
+// heartbeat.
 type RollbackRecord struct {
 	FailedVersion string    `json:"failed_version"`
 	Reason        string    `json:"reason"`
 	At            time.Time `json:"at"`
+}
+
+func rollbackRecordPath(baseDir string) string {
+	return filepath.Join(baseDir, "data", "rollback_occurred.json")
 }
 
 func writeRollbackRecord(baseDir, failedVersion, reason string) error {
@@ -19,11 +26,16 @@ func writeRollbackRecord(baseDir, failedVersion, reason string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(baseDir, "data", "rollback_occurred.json"), data, 0644)
+	p := rollbackRecordPath(baseDir)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o644)
 }
 
+// ReadRollbackRecord returns the pending rollback record, if any.
 func ReadRollbackRecord(baseDir string) (RollbackRecord, bool, error) {
-	data, err := os.ReadFile(filepath.Join(baseDir, "data", "rollback_occurred.json"))
+	data, err := os.ReadFile(rollbackRecordPath(baseDir))
 	if os.IsNotExist(err) {
 		return RollbackRecord{}, false, nil
 	}
@@ -37,6 +49,11 @@ func ReadRollbackRecord(baseDir string) (RollbackRecord, bool, error) {
 	return rec, true, nil
 }
 
+// DeleteRollbackRecord removes the record once the core has taken it over.
 func DeleteRollbackRecord(baseDir string) error {
-	return os.Remove(filepath.Join(baseDir, "data", "rollback_occurred.json"))
+	err := os.Remove(rollbackRecordPath(baseDir))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }

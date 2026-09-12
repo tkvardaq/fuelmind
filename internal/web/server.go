@@ -1,16 +1,14 @@
-// Package web serves the local dashboard (Phase 4). It exposes a
-// small HTTP API on localhost:<Port> that renders HTML pages from
-// templates and serves HTMX-style partial updates.
+// Package web serves the local dashboard. It renders HTML pages from
+// embedded templates on <bind>:<port> (all interfaces by default, so the
+// owner can open it from a phone on the station LAN).
 //
-// Per spec §2.1: "Local web UI: Served from the local core on
-// localhost:PORT, accessed via browser on the shop PC or any
-// device on the station's LAN."
-//
-// Per spec §9: dashboard requires a PIN — we never rely on
-// "it's on the LAN" as access control.
+// Per spec §9 the dashboard always requires a PIN; the very first PIN can
+// only be set from the shop PC itself (loopback), so nobody on the LAN
+// can claim a fresh install.
 package web
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"fmt"
@@ -18,6 +16,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -25,31 +24,31 @@ import (
 	"time"
 
 	"github.com/fuelmind/fuelmind/internal/auth"
+	"github.com/fuelmind/fuelmind/internal/llm"
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
 
 //go:embed templates/*
 var templatesFS embed.FS
 
-// Server is the HTTP server. Holds the dependencies the handlers
-// need and a parsed template set per page.
+// Server is the HTTP server.
 type Server struct {
-	store   *storage.Storage
-	auth    *auth.Auth
-	logger  *slog.Logger
-	port    int
-	pages   map[string]*template.Template
-	started time.Time
+	store  *storage.Storage
+	auth   *auth.Auth
+	logger *slog.Logger
+	port   int
+	pages  map[string]*template.Template
+
+	// Bind is the listen address (default "0.0.0.0", all interfaces).
+	Bind string
+	// Version is shown in the footer.
+	Version string
+	// Router answers questions typed into the "Ask" box. Nil disables it.
+	Router *llm.Router
 }
 
-// New builds a server. Templates are parsed at startup so any
-// template error is caught early.
-//
-// We parse base.html + each page into a separate template set so
-// each page's "body" define doesn't collide with another's.
-// Each page file defines a "body" block and invokes
-// {{template "base" .}}; the page-named template executes that
-// top-level {{template}} which renders the chrome around body.
+// New builds a server. Templates are parsed at startup so any template
+// error is caught early.
 func New(store *storage.Storage, a *auth.Auth, logger *slog.Logger, port int) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -76,24 +75,28 @@ func New(store *storage.Storage, a *auth.Auth, logger *slog.Logger, port int) (*
 		logger:  logger,
 		port:    port,
 		pages:   pages,
-		started: time.Now(),
+		Bind:    "0.0.0.0",
+		Version: "dev",
 	}, nil
 }
 
-// ListenAndServe blocks, serving on localhost:<port>. Returns when
-// ctx is done.
+// ListenAndServe blocks until ctx is done or the listener fails.
 func (s *Server) ListenAndServe(ctx context.Context) error {
-	mux := s.Routes()
 	srv := &http.Server{
-		Addr:              "127.0.0.1:" + strconv.Itoa(s.port),
-		Handler:           mux,
+		Addr:              net.JoinHostPort(s.Bind, strconv.Itoa(s.port)),
+		Handler:           s.Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second, // the Ask box may wait on a local LLM
 		IdleTimeout:       60 * time.Second,
 	}
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.ListenAndServe() }()
-	s.logger.Info("dashboard listening", "url", srv.Addr)
+	go func() { errCh <- srv.Serve(ln) }()
+	s.logger.Info("dashboard listening", "addr", ln.Addr().String())
 
 	select {
 	case err := <-errCh:
@@ -105,9 +108,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// Routes wires up the URL space. Public routes: /login, /setup.
-// Protected (require a session cookie): /, /sales, /credit, /score,
-// /logout.
+// Routes wires up the URL space.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
@@ -115,33 +116,35 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/setup", s.handleSetup)
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/static/", s.handleStatic)
+	mux.HandleFunc("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/static/favicon.svg", http.StatusMovedPermanently)
+	})
 
 	// Protected.
 	mux.Handle("/", s.requireAuth(http.HandlerFunc(s.handleDashboard)))
 	mux.Handle("/sales", s.requireAuth(http.HandlerFunc(s.handleSales)))
 	mux.Handle("/credit", s.requireAuth(http.HandlerFunc(s.handleCredit)))
 	mux.Handle("/score", s.requireAuth(http.HandlerFunc(s.handleScore)))
+	mux.Handle("/ask", s.requireAuth(http.HandlerFunc(s.handleAsk)))
 	mux.Handle("/logout", s.requireAuth(http.HandlerFunc(s.handleLogout)))
-
-	// Static assets (CSS, no JS dependency for v1).
-	mux.HandleFunc("/static/", s.handleStatic)
 
 	return s.securityHeaders(s.requestLogger(mux))
 }
 
-// securityHeaders sets standard defensive HTTP security headers.
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		h.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
 }
 
-// requireAuth wraps a handler so it returns 302 → /login if no
-// valid session cookie is present.
+// requireAuth redirects to /login when no valid session cookie is present.
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sid := readSessionCookie(r)
@@ -154,13 +157,11 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
-		// Stash the user_id on the request context for handlers.
 		ctx := context.WithValue(r.Context(), ctxUserID{}, uid)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// readSessionCookie returns the session id, or "".
 func readSessionCookie(r *http.Request) string {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil {
@@ -169,13 +170,11 @@ func readSessionCookie(r *http.Request) string {
 	return c.Value
 }
 
+// SessionCookieName is the name of the dashboard session cookie.
 const SessionCookieName = "fuelmind_session"
 
-// ctxUserID is the context key for the authenticated user id.
 type ctxUserID struct{}
 
-// requestLogger logs every request at debug level. Cheap; can stay
-// on permanently without flooding the log.
 func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -202,21 +201,24 @@ func (r *statusRecorder) WriteHeader(c int) {
 }
 
 func clientIP(r *http.Request) string {
-	// Best-effort; the dashboard is on localhost so this is mostly
-	// 127.0.0.1 in practice. Strip any port.
-	addr := r.RemoteAddr
-	if i := strings.LastIndex(addr, ":"); i >= 0 {
-		addr = addr[:i]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	return addr
+	return host
 }
 
-// funcMap is the set of helpers exposed to templates.
+// isLoopback reports whether the request comes from the shop PC itself.
+func isLoopback(r *http.Request) bool {
+	ip := net.ParseIP(clientIP(r))
+	return ip != nil && ip.IsLoopback()
+}
+
 func funcMap() template.FuncMap {
 	return template.FuncMap{
-		"formatMoney": formatMoney,
-		"formatLiters": formatLiters,
-		"formatDate":  formatDate,
+		"formatMoney":   formatMoney,
+		"formatLiters":  formatLiters,
+		"formatDate":    formatDate,
 		"severityClass": severityClass,
 	}
 }
@@ -229,20 +231,18 @@ func formatMoney(n float64) string {
 func formatLiters(n float64) string { return formatNum(n, 2) + " L" }
 
 func formatNum(n float64, decimals int) string {
-	// Locale-light number formatting: thousands with comma, decimals fixed.
-	// Uses math.Round for correct round-half-away-from-zero semantics
-	// instead of the int64(x+0.5) trick which can misfire on floating
-	// point values (e.g. 0.285 * 100 may be slightly below 28.5).
-	if n < 0 {
-		return "-" + formatNum(-n, decimals)
-	}
 	pow := math.Pow10(decimals)
-	scaled := n * pow
-	rounded := math.Round(scaled)
+	rounded := math.Round(math.Abs(n) * pow)
+	if rounded == 0 {
+		n = 0 // avoid "-0.00"
+	}
 	whole := int64(rounded / pow)
-	frac := rounded - float64(whole)*pow
+	frac := int64(rounded) - whole*int64(pow)
 	wstr := strconv.FormatInt(whole, 10)
 	var b strings.Builder
+	if n < 0 {
+		b.WriteByte('-')
+	}
 	for i, c := range wstr {
 		if i > 0 && (len(wstr)-i)%3 == 0 {
 			b.WriteByte(',')
@@ -251,7 +251,7 @@ func formatNum(n float64, decimals int) string {
 	}
 	if decimals > 0 {
 		b.WriteByte('.')
-		fstr := strconv.FormatInt(int64(frac), 10)
+		fstr := strconv.FormatInt(frac, 10)
 		for len(fstr) < decimals {
 			fstr = "0" + fstr
 		}
@@ -260,13 +260,17 @@ func formatNum(n float64, decimals int) string {
 	return b.String()
 }
 
+// formatDate renders "2026-09-07" as "Mon 7 Sep 2026".
 func formatDate(t string) string {
-	// t is "YYYY-MM-DD" from SQLite; pass through.
-	return t
+	d, err := time.Parse("2006-01-02", t)
+	if err != nil {
+		return t
+	}
+	return d.Format("Mon 2 Jan 2006")
 }
 
-func severityClass(s string) string {
-	switch s {
+func severityClass(s any) string {
+	switch fmt.Sprint(s) {
 	case "alert":
 		return "alert"
 	case "warn":
@@ -274,4 +278,32 @@ func severityClass(s string) string {
 	default:
 		return "info"
 	}
+}
+
+// render executes a page into a buffer first, so a template error becomes
+// a clean 500 instead of half a page served with status 200.
+func (s *Server) render(w http.ResponseWriter, name string, data map[string]any) {
+	s.renderStatus(w, http.StatusOK, name, data)
+}
+
+func (s *Server) renderStatus(w http.ResponseWriter, status int, name string, data map[string]any) {
+	tmpl, ok := s.pages[strings.TrimSuffix(name, ".html")]
+	if !ok {
+		s.logger.Error("template not found", "template", name)
+		http.Error(w, "template not found", http.StatusInternalServerError)
+		return
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["Version"] = s.Version
+	var buf bytes.Buffer
+	if err := tmpl.ExecuteTemplate(&buf, "base", data); err != nil {
+		s.logger.Error("template render", "template", name, "err", err)
+		http.Error(w, "The page could not be displayed. The error has been logged.", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = buf.WriteTo(w)
 }

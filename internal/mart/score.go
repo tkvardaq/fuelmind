@@ -4,158 +4,172 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // score is the in-memory shape of a single FuelMind Score row. Each
-// component is 0-100; the overall is the weighted sum.
+// component is 0-100.
 //
 // v1 algorithm: deliberately simple, clear-cut thresholds, no ML.
-// v2 will add anomaly detection and trend-based adjustments.
 type score struct {
-	sales        int
-	inventory    int
-	cash         int
-	credit       int
-	dataQuality  int
-	operations   int
-	overall      int
-	issues       []issue
+	sales       int
+	inventory   int
+	cash        int
+	credit      int
+	dataQuality int
+	operations  int
+	overall     int
+	issues      []issue
 }
 
-// issue is a structured description of something the operator
-// should look at. The LLM (Phase 7) reads this list verbatim to
-// explain the score in natural language.
+// issue is a structured description of something the operator should
+// look at. The LLM reads this list verbatim to explain the score.
 type issue struct {
 	Date     string `json:"date"`
 	Category string `json:"category"` // sales|inventory|cash|credit|data|operations
 	Severity string `json:"severity"` // info|warn|alert
-	Code     string `json:"code"`     // e.g. "no_transactions", "high_credit_outstanding"
+	Code     string `json:"code"`
 	Message  string `json:"message"`
 }
 
-// computeScore reads the day's data and returns a score. The
-// implementation is intentionally explicit (no clever aggregations)
-// so it's obvious in code review what triggers each issue.
-//
-// Weights (must sum to 100):
-//   sales         25
-//   inventory     15  (v1: always 100 because we have no inventory feed yet)
-//   cash          15  (v1: always 100; needs shift data in v1.1)
-//   credit        15
-//   data_quality  15
-//   operations    15
-func computeScore(ctx context.Context, db *sql.DB, date string) (score, error) {
-	s := score{
-		inventory: 100, // placeholder until inventory_variance lands
-		cash:      100, // placeholder until cash_variance lands
-	}
-	s.issues = []issue{}
+// Weights of the measured components. Inventory and cash have no data
+// feed in v1; they are stored as 100 but excluded from the overall score
+// rather than handing out 30% of the score unmeasured.
+const (
+	wSales       = 25
+	wCredit      = 15
+	wDataQuality = 15
+	wOperations  = 15
+	wMeasured    = wSales + wCredit + wDataQuality + wOperations
+)
 
-	// --- sales_score: based on whether we have transactions at all,
-	// and whether revenue is in a plausible range.
+// highCreditThreshold is the per-customer outstanding balance (PKR)
+// above which the credit component is penalised.
+const highCreditThreshold = 50000
+
+func computeScore(ctx context.Context, db *sql.DB, date string) (score, error) {
+	s := score{inventory: 100, cash: 100, issues: []issue{}}
+
+	// --- sales
 	var txCount int
 	var revenue float64
-	err := db.QueryRowContext(ctx, `
+	if err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*), COALESCE(SUM(total_amount), 0)
-		FROM transactions
-		WHERE substr(transaction_time, 1, 10) = ?
-	`, date).Scan(&txCount, &revenue)
-	if err != nil {
+		FROM transactions WHERE substr(transaction_time, 1, 10) = ?
+	`, date).Scan(&txCount, &revenue); err != nil {
 		return s, fmt.Errorf("sales: %w", err)
 	}
 	switch {
 	case txCount == 0:
-		s.sales = 50 // no data is better than bad data, but not great
-		s.issues = append(s.issues, issue{
-			Date: date, Category: "sales", Severity: "warn",
-			Code: "no_transactions", Message: "No transactions recorded for this day.",
-		})
+		s.sales = 50
+		msg := "No sales were recorded for this day."
+		if date < time.Now().Format(dateLayout) {
+			msg += " Check that the POS is still exporting files to the drop folder."
+		}
+		s.issues = append(s.issues, issue{Date: date, Category: "sales", Severity: "warn",
+			Code: "no_transactions", Message: msg})
 	case txCount < 10:
 		s.sales = 80
-		s.issues = append(s.issues, issue{
-			Date: date, Category: "sales", Severity: "info",
-			Code: "low_transaction_count", Message: fmt.Sprintf("Only %d transactions recorded.", txCount),
-		})
+		s.issues = append(s.issues, issue{Date: date, Category: "sales", Severity: "info",
+			Code: "low_transaction_count", Message: fmt.Sprintf("Only %d transactions recorded.", txCount)})
 	case revenue < 1000:
 		s.sales = 70
-		s.issues = append(s.issues, issue{
-			Date: date, Category: "sales", Severity: "info",
-			Code: "low_revenue", Message: fmt.Sprintf("Revenue of %.2f is unusually low.", revenue),
-		})
+		s.issues = append(s.issues, issue{Date: date, Category: "sales", Severity: "info",
+			Code: "low_revenue", Message: fmt.Sprintf("Revenue of PKR %.0f is unusually low.", revenue)})
 	default:
 		s.sales = 100
 	}
 
-	// --- credit_score: penalize if any single customer has more than
-	// 50,000 in outstanding credit (a real PK station's threshold).
-	var highCreditCount int
-	err = db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM credit_outstanding
-		WHERE as_of_date = ? AND outstanding_amount > 50000
-	`, date).Scan(&highCreditCount)
-	if err != nil {
+	// --- credit
+	var highCredit int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM credit_outstanding
+		WHERE as_of_date = ? AND outstanding_amount > ?
+	`, date, highCreditThreshold).Scan(&highCredit); err != nil {
 		return s, fmt.Errorf("credit: %w", err)
 	}
-	if highCreditCount > 0 {
+	s.credit = 100
+	if highCredit > 0 {
 		s.credit = 60
-		s.issues = append(s.issues, issue{
-			Date: date, Category: "credit", Severity: "alert",
+		s.issues = append(s.issues, issue{Date: date, Category: "credit", Severity: "alert",
 			Code: "high_credit_outstanding",
-			Message: fmt.Sprintf("%d customer(s) have more than 50,000 PKR outstanding.", highCreditCount),
-		})
-	} else {
-		// No high credit outstanding; if there are no transactions
-		// there's no credit risk, and normal days get full score.
-		s.credit = 100
+			Message: fmt.Sprintf("%d customer(s) owe more than PKR 50,000 on credit.", highCredit)})
 	}
 
-	// --- data_quality_score: penalize if there are raw rows that
-	// couldn't be normalized.
-	var unnorm int
-	err = db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM raw_pos_transactions r
-		LEFT JOIN transactions t ON t.raw_transaction_id = r.id
-		WHERE t.id IS NULL
-		AND received_at >= ? AND received_at < ?
-	`, date, nextDay(date)).Scan(&unnorm)
+	// --- data quality: rows we could not read, and rows whose amounts
+	// don't add up.
+	s.dataQuality = 100
+	unresolved, aliases, err := unresolvedForDate(ctx, db, date)
 	if err != nil {
 		return s, fmt.Errorf("data_quality: %w", err)
 	}
-	if unnorm > 0 {
+	if unresolved > 0 {
 		s.dataQuality = 70
-		s.issues = append(s.issues, issue{
-			Date: date, Category: "data", Severity: "warn",
-			Code: "unnormalized_rows",
-			Message: fmt.Sprintf("%d raw rows were not normalized (likely unknown product alias or bad data).", unnorm),
-		})
-	} else {
-		s.dataQuality = 100
+		msg := fmt.Sprintf("%d POS row(s) could not be read.", unresolved)
+		if len(aliases) > 0 {
+			msg += " Unknown product name(s): " + strings.Join(aliases, ", ") + "."
+		}
+		s.issues = append(s.issues, issue{Date: date, Category: "data", Severity: "warn",
+			Code: "unnormalized_rows", Message: msg})
+	}
+	var mismatched, negative int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(flags LIKE '%total_mismatch%'), 0),
+		       COALESCE(SUM(flags LIKE '%negative_quantity%'), 0)
+		FROM transactions WHERE substr(transaction_time, 1, 10) = ?
+	`, date).Scan(&mismatched, &negative); err != nil {
+		return s, fmt.Errorf("flags: %w", err)
+	}
+	if mismatched > 0 {
+		if s.dataQuality > 80 {
+			s.dataQuality = 80
+		}
+		s.issues = append(s.issues, issue{Date: date, Category: "data", Severity: "warn",
+			Code: "total_mismatch",
+			Message: fmt.Sprintf("%d sale(s) where quantity × price does not match the total charged.", mismatched)})
+	}
+	if negative > 0 {
+		s.issues = append(s.issues, issue{Date: date, Category: "data", Severity: "info",
+			Code: "negative_quantity",
+			Message: fmt.Sprintf("%d sale(s) with a negative quantity (refunds or corrections).", negative)})
 	}
 
-	// --- operations_score: high-level "is anything obviously wrong"
-	// check. v1: always 100 unless data quality is degraded.
+	// --- operations: v1 mirrors data health.
+	s.operations = 100
 	if s.dataQuality < 100 {
 		s.operations = 90
-	} else {
-		s.operations = 100
 	}
 
-	// --- overall: weighted sum.
-	s.overall = (s.sales*25 + s.inventory*15 + s.cash*15 + s.credit*15 +
-		s.dataQuality*15 + s.operations*15) / 100
-
+	s.overall = (s.sales*wSales + s.credit*wCredit + s.dataQuality*wDataQuality + s.operations*wOperations) / wMeasured
 	return s, nil
 }
 
-// nextDay returns date + 1 day as a string in the same format.
-// Used to bound the unnormalized-rows query to the day in question.
-func nextDay(date string) string {
-	t, err := time.Parse("2006-01-02", date)
+// unresolvedForDate counts raw rows for a business date that could not
+// be normalized and returns the distinct unknown product names.
+func unresolvedForDate(ctx context.Context, db *sql.DB, date string) (int, []string, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT COALESCE(u.product_alias, ''), COUNT(*),
+		       COALESCE(MAX(e.error LIKE 'unknown product%'), 0)
+		FROM raw_unresolved u
+		LEFT JOIN raw_normalize_errors e ON e.raw_transaction_id = u.id
+		WHERE u.occurred_date = ? GROUP BY 1 ORDER BY 2 DESC`, date)
 	if err != nil {
-		return date
+		return 0, nil, err
 	}
-	return t.AddDate(0, 0, 1).Format("2006-01-02")
+	defer rows.Close()
+	total := 0
+	var names []string
+	for rows.Next() {
+		var alias string
+		var n, unknown int
+		if err := rows.Scan(&alias, &n, &unknown); err != nil {
+			return 0, nil, err
+		}
+		total += n
+		if unknown == 1 && alias != "" && len(names) < 5 {
+			names = append(names, fmt.Sprintf("%q", alias))
+		}
+	}
+	return total, names, rows.Err()
 }

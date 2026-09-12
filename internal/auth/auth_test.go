@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
@@ -97,14 +99,70 @@ func TestVerifyRejectsEmpty(t *testing.T) {
 
 func TestLogout(t *testing.T) {
 	a, _ := newTestAuth(t)
-	_ = a.SetupPIN(context.Background(), "1234")
-	sid, _ := a.Login(context.Background(), "1234", "")
+	if err := a.SetupPIN(context.Background(), "12345678"); err != nil {
+		t.Fatal(err)
+	}
+	sid, err := a.Login(context.Background(), "12345678", "")
+	if err != nil || sid == "" {
+		t.Fatalf("login: sid=%q err=%v", sid, err)
+	}
+	if _, err := a.Verify(context.Background(), sid); err != nil {
+		t.Fatalf("session should be valid before logout: %v", err)
+	}
 	if err := a.Logout(context.Background(), sid); err != nil {
 		t.Fatal(err)
 	}
-	_, err := a.Verify(context.Background(), sid)
+	_, err = a.Verify(context.Background(), sid)
 	if err != ErrInvalidSession {
 		t.Errorf("expected ErrInvalidSession after logout, got %v", err)
+	}
+}
+
+func TestLockoutAfterFiveWrongPINs(t *testing.T) {
+	a, s := newTestAuth(t)
+	ctx := context.Background()
+	if err := a.SetupPIN(ctx, "12345678"); err != nil {
+		t.Fatal(err)
+	}
+	var lerr *LockedError
+	for i := 1; i <= MaxFailedAttempts; i++ {
+		_, err := a.Login(ctx, "00000000", "")
+		if i < MaxFailedAttempts && err != ErrInvalidPIN {
+			t.Fatalf("attempt %d: got %v, want ErrInvalidPIN", i, err)
+		}
+		if i == MaxFailedAttempts && !errors.As(err, &lerr) {
+			t.Fatalf("attempt %d: got %v, want LockedError", i, err)
+		}
+	}
+	// Correct PIN is refused while locked.
+	if _, err := a.Login(ctx, "12345678", ""); !errors.As(err, &lerr) {
+		t.Fatalf("correct PIN during lockout: got %v, want LockedError", err)
+	}
+	// Expire the lock: the correct PIN works and the counter resets.
+	if _, err := s.DB().Exec(`UPDATE dashboard_users SET lock_until = ?`, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Login(ctx, "12345678", ""); err != nil {
+		t.Fatalf("login after lock expiry: %v", err)
+	}
+	u, _ := s.GetDashboardUser(ctx, "owner")
+	if u.FailedAttempts != 0 || !u.LockUntil.IsZero() {
+		t.Errorf("counter not reset: %+v", u)
+	}
+}
+
+func TestPINResetClearsLockout(t *testing.T) {
+	a, _ := newTestAuth(t)
+	ctx := context.Background()
+	_ = a.SetupPIN(ctx, "12345678")
+	for i := 0; i < MaxFailedAttempts; i++ {
+		_, _ = a.Login(ctx, "00000000", "")
+	}
+	if err := a.SetupPIN(ctx, "newpin9999"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Login(ctx, "newpin9999", ""); err != nil {
+		t.Fatalf("login after reset: %v", err)
 	}
 }
 

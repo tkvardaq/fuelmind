@@ -1,17 +1,18 @@
 {{define "body"}}
 <div class="page">
   <h1>Daily sales</h1>
-  <p class="muted">Last 30 days. Newest first.</p>
+  <p class="muted">Last 30 days, newest first.</p>
 
   {{if .Rows}}
+  <div class="table-wrap">
   <table class="data">
     <thead>
       <tr>
         <th>Date</th>
         <th>Product</th>
-        <th class="num">Volume (L)</th>
+        <th class="num">Volume</th>
         <th class="num">Revenue</th>
-        <th class="num">Count</th>
+        <th class="num">Sales</th>
       </tr>
     </thead>
     <tbody>
@@ -26,10 +27,11 @@
       {{end}}
     </tbody>
   </table>
+  </div>
   {{else}}
   <div class="empty-state">
-    <p class="muted">No sales data yet. Drop a CSV into the POS drop folder, or wait for the next daily sync.</p>
-    <p class="muted small">Tip: Check that your POS system is exporting CSV files to the configured drop folder.</p>
+    <p class="muted">No sales in the last 30 days yet.</p>
+    <p class="muted small">Sales appear a few seconds after the POS saves a CSV export into the FuelMind drop folder.</p>
   </div>
   {{end}}
 </div>

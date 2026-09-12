@@ -2,10 +2,15 @@ package launcher
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/fuelmind/fuelmind/internal/version"
 )
 
+// VersionPointer is the JSON body of current.json / previous.json /
+// pending.json.
 type VersionPointer struct {
 	Version string `json:"version"`
 }
@@ -20,46 +25,65 @@ func readPointer(path string) (string, error) {
 	}
 	var p VersionPointer
 	if err := json.Unmarshal(data, &p); err != nil {
-		return "", err
+		return "", fmt.Errorf("launcher: %s: %w", filepath.Base(path), err)
+	}
+	if p.Version != "" && !version.Valid(p.Version) {
+		return "", fmt.Errorf("launcher: %s holds an invalid version %q", filepath.Base(path), p.Version)
 	}
 	return p.Version, nil
 }
 
-// writePointerAtomic writes via a temp file + os.Rename in the SAME
-// directory as the target, which is atomic on NTFS. Never write
-// directly to the target path.
-func writePointerAtomic(path, version string) error {
-	data, err := json.Marshal(VersionPointer{Version: version})
+// writePointerAtomic writes via a temp file + rename in the same
+// directory, which is atomic on NTFS.
+func writePointerAtomic(path, v string) error {
+	if !version.Valid(v) {
+		return fmt.Errorf("launcher: refusing to write invalid version %q", v)
+	}
+	data, err := json.Marshal(VersionPointer{Version: v})
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path) // atomic, same volume, same dir
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
+// ReadCurrentVersion returns the version the launcher runs.
 func ReadCurrentVersion(baseDir string) (string, error) {
 	return readPointer(filepath.Join(baseDir, "current.json"))
 }
 
+// ReadPreviousVersion returns the version to roll back to.
 func ReadPreviousVersion(baseDir string) (string, error) {
 	return readPointer(filepath.Join(baseDir, "previous.json"))
 }
 
-func WriteCurrentVersion(baseDir, version string) error {
-	return writePointerAtomic(filepath.Join(baseDir, "current.json"), version)
+// WriteCurrentVersion sets the version the launcher runs.
+func WriteCurrentVersion(baseDir, v string) error {
+	return writePointerAtomic(filepath.Join(baseDir, "current.json"), v)
 }
 
-func WritePreviousVersion(baseDir, version string) error {
-	return writePointerAtomic(filepath.Join(baseDir, "previous.json"), version)
+// WritePreviousVersion sets the rollback target.
+func WritePreviousVersion(baseDir, v string) error {
+	return writePointerAtomic(filepath.Join(baseDir, "previous.json"), v)
 }
 
+// WritePendingVersion marks a staged update for the next handoff.
+func WritePendingVersion(baseDir, v string) error {
+	return writePointerAtomic(PendingPath(baseDir), v)
+}
+
+// PendingPath is the path of pending.json.
 func PendingPath(baseDir string) string {
 	return filepath.Join(baseDir, "pending.json")
 }
 
+// ReadPending returns the staged version, if any.
 func ReadPending(baseDir string) (string, bool, error) {
 	v, err := readPointer(PendingPath(baseDir))
 	if err != nil {
@@ -68,6 +92,7 @@ func ReadPending(baseDir string) (string, bool, error) {
 	return v, v != "", nil
 }
 
+// DeletePending clears pending.json.
 func DeletePending(baseDir string) error {
 	err := os.Remove(PendingPath(baseDir))
 	if os.IsNotExist(err) {
@@ -76,6 +101,14 @@ func DeletePending(baseDir string) error {
 	return err
 }
 
-func CoreBinaryPath(baseDir, version string) string {
-	return filepath.Join(baseDir, "versions", version, "FuelMindCore.exe")
+// VersionsDir is where every installed core version lives.
+func VersionsDir(baseDir string) string { return filepath.Join(baseDir, "versions") }
+
+// CoreBinaryPath is the core executable for a version.
+func CoreBinaryPath(baseDir, v string) string {
+	return filepath.Join(VersionsDir(baseDir), v, CoreExeName)
 }
+
+// CoreExeName is the core executable's file name in every version dir and
+// next to the launcher in the install directory.
+const CoreExeName = "FuelMindCore.exe"

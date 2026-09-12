@@ -2,20 +2,21 @@ package launcher
 
 import "time"
 
-// CrashLoopDetector tracks non-graceful exit timestamps in a ring
-// buffer and flags a crash loop when too many happen within a window.
+// CrashLoopDetector tracks non-graceful exit timestamps and flags a crash
+// loop when maxCrashes happen within window.
 type CrashLoopDetector struct {
 	maxCrashes int
 	window     time.Duration
 	timestamps []time.Time
 }
 
+// NewCrashLoopDetector builds a detector.
 func NewCrashLoopDetector(maxCrashes int, window time.Duration) *CrashLoopDetector {
 	return &CrashLoopDetector{maxCrashes: maxCrashes, window: window}
 }
 
-// RecordCrash records a non-graceful exit and returns true if this
-// crash means a crash loop should now be declared.
+// RecordCrash records a non-graceful exit and returns true when this
+// crash is the maxCrashes-th inside the window.
 func (d *CrashLoopDetector) RecordCrash(at time.Time) bool {
 	d.timestamps = append(d.timestamps, at)
 	cutoff := at.Add(-d.window)
@@ -26,9 +27,10 @@ func (d *CrashLoopDetector) RecordCrash(at time.Time) bool {
 		}
 	}
 	d.timestamps = kept
-	return len(d.timestamps) > d.maxCrashes
+	return len(d.timestamps) >= d.maxCrashes
 }
 
+// Reset forgets all recorded crashes.
 func (d *CrashLoopDetector) Reset() {
 	d.timestamps = nil
 }

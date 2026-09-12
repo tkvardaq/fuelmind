@@ -575,13 +575,12 @@ func (u *updateAgent) stageUpdate(version, artifactPath string) error {
 	return launcher.WritePendingVersion(u.baseDir, version)
 }
 
-// requestHandoff finishes in-flight work and exits with the code the
-// launcher watches for.
+// requestHandoff exits with the code the launcher watches for. The
+// launcher's job object and the OS close-on-exit handle any in-flight
+// file handles; SQLite WAL means a mid-write shutdown rolls back to a
+// consistent state on the next boot.
 func (u *updateAgent) requestHandoff() {
 	u.logger.Info("update agent: requesting handoff to launcher")
-	if err := u.store.FinishInFlightWork(); err != nil {
-		u.logger.Warn("update agent: finish in-flight work", "err", err)
-	}
 	os.Exit(launcher.ExitCodeRequestRestart)
 }
 

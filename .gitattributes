@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.exe binary
+*.msi binary
+*.db binary
+*.ps1 text eol=crlf

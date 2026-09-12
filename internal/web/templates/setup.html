@@ -2,26 +2,25 @@
 <div class="auth">
   <h1>FuelMind</h1>
   {{if .PINSet}}
-    <p class="muted">A PIN is already set. To change it, go to Settings (Phase 8). For now, <a href="/login">log in</a>.</p>
+    <p class="muted">A PIN is already set. <a href="/login">Log in</a>. To change a forgotten PIN, run <code>fuelmind-setup reset-pin</code> on the shop PC as administrator.</p>
+  {{else if .Remote}}
+    <p class="muted">The first PIN can only be set from the shop PC itself. Open <strong>http://localhost:{{.Port}}/</strong> in a browser on the shop PC.</p>
   {{else}}
-    <p class="muted">Set a PIN to protect the dashboard. Anyone on the station network can reach this page &mdash; the PIN is the only thing that keeps them out.</p>
+    <p class="muted">Set a PIN to protect the dashboard. Phones and PCs on the station network can open this dashboard; the PIN is what keeps others out.</p>
     {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
     <form method="post" action="/setup">
       <div>
-        <label for="pin-input">New PIN (8+ chars)</label>
-        <input type="password" id="pin-input" name="pin" autofocus autocomplete="new-password" placeholder="New PIN (8+ chars)" minlength="8">
+        <label for="pin-input">New PIN (8 or more characters)</label>
+        <input type="password" id="pin-input" name="pin" autofocus autocomplete="new-password" minlength="8" required>
       </div>
       <div>
         <label for="pin-confirm-input">Confirm PIN</label>
-        <input type="password" id="pin-confirm-input" name="pin_confirm" autocomplete="new-password" placeholder="Confirm PIN" minlength="8">
+        <input type="password" id="pin-confirm-input" name="pin_confirm" autocomplete="new-password" minlength="8" required>
       </div>
       <div class="telemetry-consent">
         <input type="checkbox" id="telemetry-consent" name="telemetry_consent" value="true">
-        <label for="telemetry-consent">
-          Help improve FuelMind by sending anonymous usage and health data.
-          <br>
-          <span class="small">Your data is local by default. Only non-sensitive metrics (station ID, version, hardware tier, database size, error counts, last ingestion time) are sent. No fuel sales or customer data is transmitted.</span>
-        </label>
+        <label for="telemetry-consent">Also send health data to FuelMind support.</label>
+        <p class="small muted">If a FuelMind cloud is configured, the station always checks its licence and updates, which sends only the station ID and software version. With this box ticked it also sends health data: hardware tier, database size, free disk space, error counts, alert count, score and last POS file time. Sales and customer data are never sent.</p>
       </div>
       <button type="submit">Save PIN</button>
     </form>

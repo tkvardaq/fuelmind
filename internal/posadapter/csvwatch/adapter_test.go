@@ -115,7 +115,7 @@ func (n *noopNormalizer) Run(ctx context.Context, limit int) (int, int, error) {
 // noopMart is a Mart for tests that don't care about the data mart.
 type noopMart struct{}
 
-func (m *noopMart) MaterializeAfterIngest(ctx context.Context) error { return nil }
+func (m *noopMart) MaterializeSince(ctx context.Context, since time.Time) error { return nil }
 
 func newTestStorage(t *testing.T) *storage.Storage {
 	t.Helper()

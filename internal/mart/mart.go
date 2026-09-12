@@ -4,13 +4,9 @@
 // intent router read from: daily_sales, fuel_margin, credit_outstanding,
 // station_health_score.
 //
-// Per spec, the materialization job runs after every ingestion batch
-// AND on a 15-minute timer. This file implements the first half; the
-// watcher calls MaterializeAfterIngest() after every successful ingest,
-// and main.go starts a ticker for the periodic refresh.
-//
-// The FuelMind Score (station_health_score) is a v1 simple
-// weighted-sum algorithm. ML-based anomaly detection is v2.
+// The materialization job runs after every ingestion batch (from the
+// earliest business date in that batch, so backfills are picked up) and
+// on a 15-minute timer for the trailing week.
 package mart
 
 import (
@@ -19,10 +15,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
+
+const dateLayout = "2006-01-02"
 
 // Mart is the materialization job.
 type Mart struct {
@@ -39,99 +38,76 @@ func New(store *storage.Storage, logger *slog.Logger) *Mart {
 }
 
 // MaterializeSince refreshes every mart row whose date is in [since,
-// today] inclusive. Called by both the ingest hook (with since =
-// batch date) and the periodic ticker (with since = now - 24h).
-//
-// Idempotent: UPSERT semantics, re-running over the same data
-// produces the same values.
+// today] inclusive. Idempotent (UPSERT semantics).
 func (m *Mart) MaterializeSince(ctx context.Context, since time.Time) error {
-	// 1. Refresh daily_sales. We compute the set of (date,
-	//    product_code) keys present in [since, today] and rebuild
-	//    those rows. Anything older stays as-is.
-	ds, err := m.refreshDailySales(ctx, since)
+	sinceStr := since.Format(dateLayout)
+	todayStr := time.Now().Format(dateLayout)
+	if sinceStr > todayStr {
+		sinceStr = todayStr
+	}
+
+	ds, err := m.refreshDailySales(ctx, sinceStr, todayStr)
 	if err != nil {
 		return fmt.Errorf("mart: daily_sales: %w", err)
 	}
-	m.logger.Info("mart: daily_sales refreshed", "rows", ds, "since", since.Format("2006-01-02"))
-
-	// 2. Refresh fuel_margin (currently a passthrough of revenue —
-	//    cost_of_goods stays 0 until v1.1 adds the purchase-price UI).
-	fm, err := m.refreshFuelMargin(ctx, since)
+	fm, err := m.refreshFuelMargin(ctx, sinceStr, todayStr)
 	if err != nil {
 		return fmt.Errorf("mart: fuel_margin: %w", err)
 	}
-	m.logger.Info("mart: fuel_margin refreshed", "rows", fm)
-
-	// 3. Refresh credit_outstanding (as-of today for every customer
-	//    with a credit sale in [since, today]).
-	co, err := m.refreshCreditOutstanding(ctx, since)
+	dates, err := m.datesToScore(ctx, sinceStr, todayStr)
+	if err != nil {
+		return fmt.Errorf("mart: dates: %w", err)
+	}
+	co, err := m.refreshCreditOutstanding(ctx, dates)
 	if err != nil {
 		return fmt.Errorf("mart: credit_outstanding: %w", err)
 	}
-	m.logger.Info("mart: credit_outstanding refreshed", "rows", co)
-
-	// 4. Refresh the FuelMind Score for every day in [since, today].
-	sc, err := m.refreshScores(ctx, since)
+	sc, err := m.refreshScores(ctx, dates)
 	if err != nil {
 		return fmt.Errorf("mart: station_health_score: %w", err)
 	}
-	m.logger.Info("mart: station_health_score refreshed", "rows", sc)
-
+	m.logger.Debug("mart refreshed", "since", sinceStr, "daily_sales", ds, "fuel_margin", fm,
+		"credit_outstanding", co, "scores", sc)
 	return nil
 }
 
-// MaterializeAfterIngest is a convenience for the watcher. It figures
-// out the date(s) touched by the batch and refreshes from the
-// earliest one. Cheap because the per-day UPSERT is bounded.
-func (m *Mart) MaterializeAfterIngest(ctx context.Context) error {
-	// Find the earliest date in transactions that hasn't been
-	// materialized in the last 5 minutes (i.e. recent ingest
-	// activity). For v1 we just refresh the last 2 days — the daily
-	// mart keys are bounded by date and the cost is trivial.
-	return m.MaterializeSince(ctx, time.Now().AddDate(0, 0, -2))
-}
-
-// MaterializeAll refreshes all mart rows across the entire transaction history.
-// Useful for full rebuilds, backfills, and database repairs.
+// MaterializeAll refreshes all mart rows across the entire history.
 func (m *Mart) MaterializeAll(ctx context.Context) error {
-	var earliest string
+	var earliest sql.NullString
 	err := m.store.DB().QueryRowContext(ctx, `
-		SELECT COALESCE(MIN(substr(transaction_time, 1, 10)), '')
-		FROM transactions
-	`).Scan(&earliest)
-	if err != nil || earliest == "" {
-		return m.MaterializeSince(ctx, time.Now().AddDate(0, 0, -30))
-	}
-	t, err := time.Parse("2006-01-02", earliest)
+		SELECT MIN(d) FROM (
+			SELECT MIN(substr(transaction_time, 1, 10)) AS d FROM transactions
+			UNION ALL
+			SELECT MIN(occurred_date) FROM raw_unresolved
+		)`).Scan(&earliest)
 	if err != nil {
-		return m.MaterializeSince(ctx, time.Now().AddDate(0, 0, -365))
+		return fmt.Errorf("mart: earliest date: %w", err)
+	}
+	if !earliest.Valid || earliest.String == "" {
+		return m.MaterializeSince(ctx, time.Now())
+	}
+	t, err := time.ParseInLocation(dateLayout, earliest.String, time.Local)
+	if err != nil {
+		return fmt.Errorf("mart: bad earliest date %q: %w", earliest.String, err)
 	}
 	return m.MaterializeSince(ctx, t)
 }
 
-// refreshDailySales UPSERTs daily_sales rows for [since, today].
-func (m *Mart) refreshDailySales(ctx context.Context, since time.Time) (int, error) {
-	q := `
+func (m *Mart) refreshDailySales(ctx context.Context, since, until string) (int, error) {
+	res, err := m.store.DB().ExecContext(ctx, `
 		INSERT INTO daily_sales (date, product_code, volume_liters, revenue, transaction_count, updated_at)
-		SELECT
-			substr(t.transaction_time, 1, 10) AS date,
-			t.product_code,
-			COALESCE(SUM(t.quantity_liters), 0) AS volume_liters,
-			COALESCE(SUM(t.total_amount), 0) AS revenue,
-			COUNT(*) AS transaction_count,
-			CURRENT_TIMESTAMP
+		SELECT substr(t.transaction_time, 1, 10), t.product_code,
+		       COALESCE(SUM(t.quantity_liters), 0), COALESCE(SUM(t.total_amount), 0),
+		       COUNT(*), CURRENT_TIMESTAMP
 		FROM transactions t
-		WHERE substr(t.transaction_time, 1, 10) >= ? AND substr(t.transaction_time, 1, 10) <= ?
+		WHERE substr(t.transaction_time, 1, 10) BETWEEN ? AND ?
 		GROUP BY substr(t.transaction_time, 1, 10), t.product_code
 		ON CONFLICT (date, product_code) DO UPDATE SET
 			volume_liters     = excluded.volume_liters,
 			revenue           = excluded.revenue,
 			transaction_count = excluded.transaction_count,
 			updated_at        = CURRENT_TIMESTAMP
-	`
-	sinceStr := since.Format("2006-01-02")
-	todayStr := time.Now().Format("2006-01-02")
-	res, err := m.store.DB().ExecContext(ctx, q, sinceStr, todayStr)
+	`, since, until)
 	if err != nil {
 		return 0, err
 	}
@@ -139,32 +115,18 @@ func (m *Mart) refreshDailySales(ctx context.Context, since time.Time) (int, err
 	return int(n), nil
 }
 
-// refreshFuelMargin UPSERTs fuel_margin rows. In v1 the cost of
-// goods is 0 (no purchase-price feed), so margin_pct is 0 for every
-// row. v1.1 will add the cost input.
-func (m *Mart) refreshFuelMargin(ctx context.Context, since time.Time) (int, error) {
-	q := `
+// refreshFuelMargin UPSERTs fuel_margin rows. v1 has no purchase-price
+// feed, so cost_of_goods and margin are 0 (unknown), not "equal to
+// revenue".
+func (m *Mart) refreshFuelMargin(ctx context.Context, since, until string) (int, error) {
+	res, err := m.store.DB().ExecContext(ctx, `
 		INSERT INTO fuel_margin (date, product_code, revenue, cost_of_goods, margin_amount, margin_pct, updated_at)
-		SELECT
-			date,
-			product_code,
-			revenue,
-			0.0 AS cost_of_goods,
-			revenue AS margin_amount,
-			0.0 AS margin_pct,
-			CURRENT_TIMESTAMP
-		FROM daily_sales
-		WHERE date >= ? AND date <= ?
+		SELECT date, product_code, revenue, 0.0, 0.0, 0.0, CURRENT_TIMESTAMP
+		FROM daily_sales WHERE date BETWEEN ? AND ?
 		ON CONFLICT (date, product_code) DO UPDATE SET
-			revenue      = excluded.revenue,
-			cost_of_goods = excluded.cost_of_goods,
-			margin_amount = excluded.margin_amount,
-			margin_pct   = excluded.margin_pct,
-			updated_at   = CURRENT_TIMESTAMP
-	`
-	sinceStr := since.Format("2006-01-02")
-	todayStr := time.Now().Format("2006-01-02")
-	res, err := m.store.DB().ExecContext(ctx, q, sinceStr, todayStr)
+			revenue    = excluded.revenue,
+			updated_at = CURRENT_TIMESTAMP
+	`, since, until)
 	if err != nil {
 		return 0, err
 	}
@@ -172,108 +134,118 @@ func (m *Mart) refreshFuelMargin(ctx context.Context, since time.Time) (int, err
 	return int(n), nil
 }
 
-// refreshCreditOutstanding aggregates per-customer running balance
-// for as_of_date = today. v1 only sees credit sales (no payment
-// feed); the balance is simply the sum of all credit sales for the
-// customer. v1.1 will subtract payments.
-func (m *Mart) refreshCreditOutstanding(ctx context.Context, since time.Time) (int, error) {
-	// Get dates with any transaction activity in [since, today].
-	dates, err := m.datesWithActivity(ctx, since)
-	if err != nil {
-		return 0, err
-	}
-	var totalUpdated int
-	for _, dateStr := range dates {
-		q := `
+// refreshCreditOutstanding snapshots every credit customer's balance as
+// of each date. v1 sees credit sales only (no payment feed), so the
+// balance is the sum of credit sales up to that date and days_overdue is
+// the number of days since the customer's most recent credit purchase.
+func (m *Mart) refreshCreditOutstanding(ctx context.Context, dates []string) (int, error) {
+	total := 0
+	for _, d := range dates {
+		res, err := m.store.DB().ExecContext(ctx, `
 			INSERT INTO credit_outstanding
 				(customer_phone, as_of_date, outstanding_amount, transaction_count, days_overdue, updated_at)
-			SELECT
-				customer_phone,
-				? AS as_of_date,
-				COALESCE(SUM(total_amount), 0) AS outstanding_amount,
-				COUNT(*) AS transaction_count,
-				CASE
-					WHEN MAX(substr(transaction_time, 1, 10)) < ? THEN
-						CAST(julianday(?) - julianday(MAX(substr(transaction_time, 1, 10))) AS INTEGER)
-					ELSE 0
-				END AS days_overdue,
-				CURRENT_TIMESTAMP
+			SELECT customer_phone, ?, COALESCE(SUM(total_amount), 0), COUNT(*),
+			       CAST(julianday(?) - julianday(MAX(substr(transaction_time, 1, 10))) AS INTEGER),
+			       CURRENT_TIMESTAMP
 			FROM transactions
 			WHERE payment_method = 'CREDIT' AND customer_phone IS NOT NULL AND customer_phone != ''
-				AND substr(transaction_time, 1, 10) <= ?
+			  AND substr(transaction_time, 1, 10) <= ?
 			GROUP BY customer_phone
 			ON CONFLICT (customer_phone, as_of_date) DO UPDATE SET
 				outstanding_amount = excluded.outstanding_amount,
 				transaction_count  = excluded.transaction_count,
 				days_overdue       = excluded.days_overdue,
 				updated_at         = CURRENT_TIMESTAMP
-		`
-		res, err := m.store.DB().ExecContext(ctx, q, dateStr, dateStr, dateStr, dateStr)
+		`, d, d, d)
 		if err != nil {
 			return 0, err
 		}
 		n, _ := res.RowsAffected()
-		totalUpdated += int(n)
+		total += int(n)
 	}
-	return totalUpdated, nil
+	return total, nil
 }
 
-// refreshScores computes the FuelMind Score for every date in
-// [since, today]. v1 algorithm: a simple weighted sum of clear-cut
-// thresholds. See score.go for the implementation.
-func (m *Mart) refreshScores(ctx context.Context, since time.Time) (int, error) {
-	dates, err := m.datesWithActivity(ctx, since)
-	if err != nil {
-		return 0, err
-	}
+func (m *Mart) refreshScores(ctx context.Context, dates []string) (int, error) {
 	count := 0
 	for _, d := range dates {
 		s, err := computeScore(ctx, m.store.DB(), d)
 		if err != nil {
-			m.logger.Warn("compute score", "date", d, "err", err)
-			continue
+			return count, fmt.Errorf("compute score %s: %w", d, err)
 		}
 		if err := upsertScore(ctx, m.store.DB(), d, s); err != nil {
-			m.logger.Warn("upsert score", "date", d, "err", err)
-			continue
+			return count, fmt.Errorf("upsert score %s: %w", d, err)
 		}
 		count++
 	}
 	return count, nil
 }
 
-// datesWithActivity returns the set of dates between [since, today]
-// that have at least one transaction.
-func (m *Mart) datesWithActivity(ctx context.Context, since time.Time) ([]string, error) {
-	q := `
-		SELECT DISTINCT substr(transaction_time, 1, 10) AS d
-		FROM transactions
-		WHERE substr(transaction_time, 1, 10) >= ? AND substr(transaction_time, 1, 10) <= ?
-		ORDER BY d ASC
-	`
-	rows, err := m.store.DB().QueryContext(ctx, q,
-		since.Format("2006-01-02"),
-		time.Now().Format("2006-01-02"),
-	)
+// datesToScore returns the business dates in [since, until] that get a
+// FuelMind Score:
+//   - every date with normalized sales,
+//   - every date with raw rows that could not be normalized (so a day of
+//     unreadable data raises an issue instead of looking empty),
+//   - every past date (before today) since the station's first data, so
+//     a day with no POS export at all is flagged too.
+func (m *Mart) datesToScore(ctx context.Context, since, until string) ([]string, error) {
+	set := map[string]bool{}
+	rows, err := m.store.DB().QueryContext(ctx, `
+		SELECT DISTINCT substr(transaction_time, 1, 10) FROM transactions
+		WHERE substr(transaction_time, 1, 10) BETWEEN ?1 AND ?2
+		UNION
+		SELECT DISTINCT occurred_date FROM raw_unresolved
+		WHERE occurred_date BETWEEN ?1 AND ?2`, since, until)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []string
 	for rows.Next() {
-		var d string
+		var d sql.NullString
 		if err := rows.Scan(&d); err != nil {
+			rows.Close()
 			return nil, err
 		}
+		if d.Valid && d.String != "" {
+			set[d.String] = true
+		}
+	}
+	rows.Close()
+
+	var first sql.NullString
+	if err := m.store.DB().QueryRowContext(ctx,
+		`SELECT MIN(substr(transaction_time, 1, 10)) FROM transactions`).Scan(&first); err != nil {
+		return nil, err
+	}
+	if first.Valid && first.String != "" {
+		start := since
+		if first.String > start {
+			start = first.String
+		}
+		yesterday := time.Now().AddDate(0, 0, -1).Format(dateLayout)
+		if yesterday > until {
+			yesterday = until
+		}
+		if t, err := time.Parse(dateLayout, start); err == nil {
+			for d := t; d.Format(dateLayout) <= yesterday; d = d.AddDate(0, 0, 1) {
+				set[d.Format(dateLayout)] = true
+			}
+		}
+	}
+
+	out := make([]string, 0, len(set))
+	for d := range set {
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	sort.Strings(out)
+	return out, nil
 }
 
-// upsertScore writes one station_health_score row.
 func upsertScore(ctx context.Context, db *sql.DB, date string, s score) error {
-	issuesJSON, _ := json.Marshal(s.issues)
-	_, err := db.ExecContext(ctx, `
+	issuesJSON, err := json.Marshal(s.issues)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
 		INSERT INTO station_health_score
 			(date, sales_score, inventory_score, cash_score, credit_score,
 			 data_quality_score, operations_score, overall_score, issues_json, updated_at)
@@ -288,8 +260,6 @@ func upsertScore(ctx context.Context, db *sql.DB, date string, s score) error {
 			overall_score      = excluded.overall_score,
 			issues_json        = excluded.issues_json,
 			updated_at         = CURRENT_TIMESTAMP
-	`,
-		date, s.sales, s.inventory, s.cash, s.credit, s.dataQuality, s.operations, s.overall, string(issuesJSON),
-	)
+	`, date, s.sales, s.inventory, s.cash, s.credit, s.dataQuality, s.operations, s.overall, string(issuesJSON))
 	return err
 }
