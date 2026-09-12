@@ -34,13 +34,29 @@ func main() {
 	}
 
 	baseDir := dataDir()
-	logFile, err := launcher.OpenRotatingLog(filepath.Join(baseDir, "logs"), "launcher.log")
+	isService, err := launcher.IsWindowsService()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "launcher: cannot determine session type: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Under the SCM there is no console: writing to stderr fails, and an
+	// io.MultiWriter would stop at that error and never reach the file.
+	// So a service logs to the file only.
+	logFile, logErr := launcher.OpenRotatingLog(filepath.Join(baseDir, "logs"), "launcher.log")
 	var out io.Writer = os.Stderr
-	if err == nil {
+	if logErr == nil {
 		defer logFile.Close()
-		out = io.MultiWriter(os.Stderr, logFile)
+		if isService {
+			out = logFile
+		} else {
+			out = io.MultiWriter(os.Stderr, logFile)
+		}
 	}
 	logger := log.New(out, "launcher: ", log.LstdFlags)
+	if logErr != nil {
+		logger.Printf("cannot open launcher.log: %v", logErr)
+	}
 
 	exe, _ := os.Executable()
 	port := 8765
@@ -55,10 +71,6 @@ func main() {
 	})
 	logger.Printf("starting %s (data dir %s)", version, baseDir)
 
-	isService, err := launcher.IsWindowsService()
-	if err != nil {
-		logger.Fatalf("cannot determine session type: %v", err)
-	}
 	if isService {
 		if err := launcher.RunService(ServiceName, sup.Run); err != nil {
 			logger.Fatalf("service: %v", err)

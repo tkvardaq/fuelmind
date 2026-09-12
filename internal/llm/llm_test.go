@@ -226,11 +226,24 @@ func TestRouter_ProductAndPeriods(t *testing.T) {
 }
 
 func TestUngroundedNumbers(t *testing.T) {
-	prompt := "Revenue today: 125000.50 PKR from 12 sales"
-	if bad := ungroundedNumbers("Revenue is 125,000.50 (about 125,001) from 12 sales.", prompt); len(bad) != 0 {
+	c := sampleContext()
+	grounded := "Revenue is 125,000.50 today (about 125,001) from 1,450.25 liters over the last 7 days."
+	if bad := ungroundedNumbers(grounded, c); len(bad) != 0 {
 		t.Errorf("grounded numbers rejected: %v", bad)
 	}
-	if bad := ungroundedNumbers("That is 14% up.", prompt); len(bad) != 1 {
-		t.Errorf("invented number not caught: %v", bad)
+	// A percentage is never in the mart context, so it must be caught
+	// even though "12" appears in the context date and "7" in "last 7 days".
+	for _, reply := range []string{
+		"Profit fell because volume dropped 12% and costs rose 7% this week.",
+		"Revenue was 987654 PKR.",
+		"Margin is about 3.5%.",
+	} {
+		if bad := ungroundedNumbers(reply, c); len(bad) == 0 {
+			t.Errorf("invented figures not caught in %q", reply)
+		}
+	}
+	// The score and its denominator are quotable.
+	if bad := ungroundedNumbers("Your score is 82/100 with 1 open issue.", c); len(bad) != 0 {
+		t.Errorf("score rejected: %v", bad)
 	}
 }

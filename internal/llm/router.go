@@ -136,7 +136,7 @@ func (r *Router) Route(ctx context.Context, question string, m MartContext) (ans
 	if lerr != nil {
 		return "I don't have that data. " + helpText, "llm-fail", lerr
 	}
-	if bad := ungroundedNumbers(reply, prompt); len(bad) > 0 {
+	if bad := ungroundedNumbers(reply, m); len(bad) > 0 {
 		// The model produced a number that is not in its context:
 		// never show it (spec §4 hard rule, plan risk R6).
 		return "I don't have that data. " + helpText, "llm-rejected", nil
@@ -189,20 +189,80 @@ func displayProduct(code string) string {
 	}
 }
 
-var reNumber = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?`)
+// --- post-generation grounding check (spec §4 hard rule) ---
+//
+// The LLM may only repeat numbers it was given. Checking the reply
+// against "any number that appears in the prompt" is not enough: the
+// prompt also contains dates and phrases like "Last 7 days", which would
+// bless an invented "12%" (12 is in the date) or "7%". So the allowed set
+// is built from the *values* in the mart context.
 
-// ungroundedNumbers returns every number in reply that does not appear in
-// the prompt (which holds the context block and the question).
-func ungroundedNumbers(reply, prompt string) []string {
+var (
+	reNumber  = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?`)
+	rePercent = regexp.MustCompile(`(\d[\d,]*(?:\.\d+)?)\s*%`)
+	reDate    = regexp.MustCompile(`\d{4}-\d{2}-\d{2}`)
+)
+
+// windowConstants are the period lengths the answers talk about; a reply
+// may mention them ("over the last 7 days") without quoting data.
+var windowConstants = map[string]bool{"7": true, "30": true, "24": true, "100": true}
+
+// allowedNumbers is every figure the model is allowed to state: the mart
+// values it was given, plus any number inside the pre-computed issue
+// messages (those are produced by the mart, not the model).
+func allowedNumbers(c MartContext) map[string]bool {
 	allowed := map[string]bool{}
-	for _, n := range reNumber.FindAllString(prompt, -1) {
-		for _, form := range numberForms(n) {
+	add := func(v float64) {
+		for _, form := range numberForms(strconv.FormatFloat(v, 'f', -1, 64)) {
 			allowed[form] = true
 		}
 	}
+	for _, v := range []float64{
+		c.RevenueToday, c.RevenueYesterday, c.VolumeTodayLiters, c.Volume7d, c.Revenue7d,
+		c.CreditOutstanding, float64(c.CreditCustomers), float64(c.TransactionsToday),
+		float64(c.OverallScore), float64(len(c.OpenIssues)),
+	} {
+		add(v)
+	}
+	for _, p := range c.TopProducts {
+		add(p.Volume)
+		add(p.Money)
+	}
+	for _, issue := range c.OpenIssues {
+		for _, n := range reNumber.FindAllString(issue, -1) {
+			for _, form := range numberForms(n) {
+				allowed[form] = true
+			}
+		}
+	}
+	return allowed
+}
+
+// ungroundedNumbers returns the figures in reply that the model was not
+// given. Dates that match the context's own dates are ignored, and a
+// percentage must always be an actual value (never a window constant),
+// because "volume dropped 12%" is exactly the fabrication to catch.
+func ungroundedNumbers(reply string, c MartContext) []string {
+	allowed := allowedNumbers(c)
 	var bad []string
-	for _, n := range reNumber.FindAllString(reply, -1) {
-		if !allowed[canonical(n)] {
+
+	for _, m := range rePercent.FindAllStringSubmatch(reply, -1) {
+		if !allowed[canonical(m[1])] {
+			bad = append(bad, m[0])
+		}
+	}
+
+	// Drop percentages (already judged) and known dates before looking at
+	// the remaining numbers.
+	rest := rePercent.ReplaceAllString(reply, " ")
+	for _, d := range reDate.FindAllString(rest, -1) {
+		if d == c.Date || d == c.ScoreDate {
+			rest = strings.ReplaceAll(rest, d, " ")
+		}
+	}
+	for _, n := range reNumber.FindAllString(rest, -1) {
+		cn := canonical(n)
+		if !allowed[cn] && !windowConstants[cn] {
 			bad = append(bad, n)
 		}
 	}
@@ -210,7 +270,7 @@ func ungroundedNumbers(reply, prompt string) []string {
 }
 
 // numberForms returns the canonical form of n plus its common roundings,
-// so "125000.50" in the context also allows "125,000.5" or "125,001".
+// so 125000.50 in the context also allows "125,000.5" or "125,001".
 func numberForms(n string) []string {
 	f, err := strconv.ParseFloat(strings.ReplaceAll(n, ",", ""), 64)
 	if err != nil {

@@ -32,7 +32,9 @@
         <Directory Id="INSTALLFOLDER" Name="FuelMind" />
       </Directory>
       <Directory Id="CommonAppDataFolder">
-        <Directory Id="FUELMIND_DATA" Name="FuelMind" />
+        <Directory Id="FUELMIND_DATA" Name="FuelMind">
+          <Directory Id="FUELMIND_POSDROP" Name="pos_drop" />
+        </Directory>
       </Directory>
     </Directory>
 
@@ -94,12 +96,39 @@
       </Component>
     </DirectoryRef>
 
+    <!-- Lock the data folder down: it holds the station's sales history,
+         and ProgramData otherwise grants every local user read access by
+         inheritance. The POS drop folder stays writable by authenticated
+         users, because the POS export runs as an ordinary account.
+         Well-known SIDs avoid localized names: S-1-5-19 LOCAL SERVICE,
+         S-1-5-18 SYSTEM, S-1-5-32-544 Administrators,
+         S-1-5-11 Authenticated Users.
+         The trailing "." keeps the quoted path from ending in a
+         backslash, which the command line parser would escape. -->
+    <CustomAction Id="SetDataFolderAcl" Directory="FUELMIND_DATA"
+                  ExeCommand="&quot;[System64Folder]icacls.exe&quot; &quot;[FUELMIND_DATA].&quot; /inheritance:r /grant *S-1-5-19:(OI)(CI)F /grant *S-1-5-18:(OI)(CI)F /grant *S-1-5-32-544:(OI)(CI)F"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="SetPosDropAcl" Directory="FUELMIND_POSDROP"
+                  ExeCommand="&quot;[System64Folder]icacls.exe&quot; &quot;[FUELMIND_POSDROP].&quot; /grant *S-1-5-11:(OI)(CI)M"
+                  Execute="deferred" Impersonate="no" Return="check" />
+
+
+    <DirectoryRef Id="FUELMIND_POSDROP">
+      <Component Id="PosDropFolder" Guid="*">
+        <CreateFolder />
+        <RegistryValue Root="HKLM" Key="Software\FuelMind" Name="PosDrop"
+                       Type="string" Value="[FUELMIND_POSDROP]" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
     <!-- After install, open the dashboard so the owner can set the PIN.
          The first PIN can only be set from this PC (loopback). -->
     <Property Id="WixShellExecTarget" Value="http://localhost:8765/" />
     <CustomAction Id="OpenDashboard" BinaryKey="WixCA" DllEntry="WixShellExec"
                   Impersonate="yes" Return="ignore" />
     <InstallExecuteSequence>
+      <Custom Action="SetDataFolderAcl" After="CreateFolders">NOT REMOVE</Custom>
+      <Custom Action="SetPosDropAcl" After="SetDataFolderAcl">NOT REMOVE</Custom>
       <Custom Action="OpenDashboard" After="InstallFinalize">NOT Installed AND NOT REMOVE</Custom>
     </InstallExecuteSequence>
 
@@ -108,6 +137,7 @@
       <ComponentRef Id="ServiceExe" />
       <ComponentRef Id="SetupExe" />
       <ComponentRef Id="DataFolder" />
+      <ComponentRef Id="PosDropFolder" />
     </Feature>
   </Product>
 </Wix>
