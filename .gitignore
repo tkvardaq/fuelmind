@@ -38,3 +38,6 @@ installer/*.msi
 installer/*.wixobj
 installer/*.wixpdb
 *.log
+
+# Local clone of the GitHub repo, not part of this tree
+/fuelmind/
