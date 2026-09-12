@@ -23,8 +23,13 @@ then `%LOCALAPPDATA%\WiX\tools`).
 - Registers the service **FuelMindService** running
   `fuelmind-launcher.exe` as `NT AUTHORITY\LocalService`, automatic
   start, with restart-on-failure recovery.
-- Creates `%ProgramData%\FuelMind\` granting full access to LocalService,
-  Administrators and SYSTEM only.
+- Creates `%ProgramData%FuelMind` and its `pos_drop` sub-folder.
+  The **service** locks the data folder down on every start
+  (LocalService, SYSTEM and Administrators only, inheritance
+  broken), while leaving `pos_drop` writable by authenticated users
+  so the POS export can deliver files. Doing it in the service
+  rather than the installer means a folder restored from backup or
+  copied to another PC is protected too.
 - Adds a firewall rule for TCP 8765, scoped to the local subnet, so the
   owner's phone can open the dashboard.
 - Opens `http://localhost:8765/` after installing, where the owner sets
@@ -56,3 +61,7 @@ sc query FuelMindService
   build so upgrades replace the old install.
 - The data folder is deliberately left behind on uninstall: it holds the
   station's sales history. Delete it by hand to remove everything.
+
+**Support note:** because the data folder is locked down, run
+`fuelmind-setup.exe` from an **administrator** prompt; an ordinary account
+cannot read the database.

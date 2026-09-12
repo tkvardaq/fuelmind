@@ -95,6 +95,12 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			s.log.Printf("installed core %s from %s", v, s.opt.InstallDir)
 		}
 	}
+	// The data folder holds the station's sales history; make sure
+	// only the service account and administrators can read it.
+	if err := HardenDataDir(s.opt.BaseDir); err != nil {
+		s.log.Printf("could not restrict permissions on %s: %v", s.opt.BaseDir, err)
+	}
+
 	current, err := ReadCurrentVersion(s.opt.BaseDir)
 	if err != nil {
 		return err

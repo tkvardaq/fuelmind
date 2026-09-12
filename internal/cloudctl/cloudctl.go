@@ -68,6 +68,15 @@ type Server struct {
 
 	// AdminToken guards /v1/admin/**. Empty disables the admin API.
 	AdminToken string
+
+	// WebhookToken guards the WhatsApp/SMS webhook. Empty disables it.
+	WebhookToken string
+	// WebhookWait is how long the webhook waits for the station to
+	// answer before telling the sender it is offline (default 25s).
+	WebhookWait time.Duration
+
+	messages map[string]*Message
+	order    []string
 }
 
 // New returns a fresh Server with no stations preloaded.
@@ -139,6 +148,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/v1/license/", s.handleLicense)
 	mux.HandleFunc("/v1/updates/check", s.handleUpdatesCheck)
 	mux.HandleFunc("/v1/admin/stations/", s.handleAdminStationLicense)
+	mux.HandleFunc("/v1/messages/pending", s.handlePendingMessages)
+	mux.HandleFunc("/v1/messages/", s.handleMessageReply)
+	mux.HandleFunc("/v1/admin/messages", s.handleAdminMessages)
+	mux.HandleFunc("/v1/whatsapp/webhook", s.handleWhatsAppWebhook)
 	return mux
 }
 
@@ -385,4 +398,12 @@ func BuildHeartbeatResponse(st *Station) any {
 // Describe renders a one-line summary for test failure messages.
 func (st *Station) Describe() string {
 	return fmt.Sprintf("%s(tier=%s, status=%s)", st.StationID, st.Tier, st.Status)
+}
+
+// subtleCompare is a constant-time string comparison (1 = equal).
+func subtleCompare(a, b string) int {
+	if len(a) != len(b) {
+		return 0
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b))
 }

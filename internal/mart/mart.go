@@ -115,17 +115,35 @@ func (m *Mart) refreshDailySales(ctx context.Context, since, until string) (int,
 	return int(n), nil
 }
 
-// refreshFuelMargin UPSERTs fuel_margin rows. v1 has no purchase-price
-// feed, so cost_of_goods and margin are 0 (unknown), not "equal to
-// revenue".
+// refreshFuelMargin UPSERTs fuel_margin rows. Cost of goods comes from
+// the purchase price in force on that day (fuel_purchase_prices, entered
+// by the owner). Days with no price on record keep cost 0 and are shown
+// as "no cost recorded" rather than as pure profit.
 func (m *Mart) refreshFuelMargin(ctx context.Context, since, until string) (int, error) {
 	res, err := m.store.DB().ExecContext(ctx, `
 		INSERT INTO fuel_margin (date, product_code, revenue, cost_of_goods, margin_amount, margin_pct, updated_at)
-		SELECT date, product_code, revenue, 0.0, 0.0, 0.0, CURRENT_TIMESTAMP
-		FROM daily_sales WHERE date BETWEEN ? AND ?
+		SELECT ds.date, ds.product_code, ds.revenue,
+		       COALESCE(price.cost_per_liter, 0) * ds.volume_liters AS cost_of_goods,
+		       CASE WHEN price.cost_per_liter IS NULL THEN 0
+		            ELSE ds.revenue - price.cost_per_liter * ds.volume_liters END AS margin_amount,
+		       CASE WHEN price.cost_per_liter IS NULL OR ds.revenue = 0 THEN 0
+		            ELSE ((ds.revenue - price.cost_per_liter * ds.volume_liters) / ds.revenue) * 100 END AS margin_pct,
+		       CURRENT_TIMESTAMP
+		FROM daily_sales ds
+		LEFT JOIN (
+			SELECT p.product_code, p.effective_date, p.cost_per_liter
+			FROM fuel_purchase_prices p
+		) price ON price.product_code = ds.product_code
+		       AND price.effective_date = (
+			SELECT MAX(p2.effective_date) FROM fuel_purchase_prices p2
+			WHERE p2.product_code = ds.product_code AND p2.effective_date <= ds.date)
+		WHERE ds.date BETWEEN ? AND ?
 		ON CONFLICT (date, product_code) DO UPDATE SET
-			revenue    = excluded.revenue,
-			updated_at = CURRENT_TIMESTAMP
+			revenue       = excluded.revenue,
+			cost_of_goods = excluded.cost_of_goods,
+			margin_amount = excluded.margin_amount,
+			margin_pct    = excluded.margin_pct,
+			updated_at    = CURRENT_TIMESTAMP
 	`, since, until)
 	if err != nil {
 		return 0, err
@@ -135,28 +153,61 @@ func (m *Mart) refreshFuelMargin(ctx context.Context, since, until string) (int,
 }
 
 // refreshCreditOutstanding snapshots every credit customer's balance as
-// of each date. v1 sees credit sales only (no payment feed), so the
-// balance is the sum of credit sales up to that date and days_overdue is
-// the number of days since the customer's most recent credit purchase.
+// of each date: credit sales up to that date minus repayments recorded up
+// to that date. days_overdue counts from the oldest sale that the
+// payments received so far do not cover, so a customer who keeps paying
+// stays at zero.
 func (m *Mart) refreshCreditOutstanding(ctx context.Context, dates []string) (int, error) {
 	total := 0
 	for _, d := range dates {
 		res, err := m.store.DB().ExecContext(ctx, `
 			INSERT INTO credit_outstanding
 				(customer_phone, as_of_date, outstanding_amount, transaction_count, days_overdue, updated_at)
-			SELECT customer_phone, ?, COALESCE(SUM(total_amount), 0), COUNT(*),
-			       CAST(julianday(?) - julianday(MAX(substr(transaction_time, 1, 10))) AS INTEGER),
+			SELECT s.customer_phone,
+			       ?1,
+			       s.sales_total - COALESCE(p.paid_total, 0),
+			       s.sales_count,
+			       CASE
+			         WHEN s.sales_total - COALESCE(p.paid_total, 0) <= 0 THEN 0
+			         ELSE CAST(julianday(?1) - julianday(COALESCE(oldest.unpaid_date, s.last_sale_date)) AS INTEGER)
+			       END,
 			       CURRENT_TIMESTAMP
-			FROM transactions
-			WHERE payment_method = 'CREDIT' AND customer_phone IS NOT NULL AND customer_phone != ''
-			  AND substr(transaction_time, 1, 10) <= ?
-			GROUP BY customer_phone
+			FROM (
+				SELECT customer_phone,
+				       SUM(total_amount) AS sales_total,
+				       COUNT(*) AS sales_count,
+				       MAX(substr(transaction_time, 1, 10)) AS last_sale_date
+				FROM transactions
+				WHERE payment_method = 'CREDIT' AND customer_phone IS NOT NULL AND customer_phone != ''
+				  AND substr(transaction_time, 1, 10) <= ?1
+				GROUP BY customer_phone
+			) s
+			LEFT JOIN (
+				SELECT customer_phone, SUM(amount) AS paid_total
+				FROM credit_payments WHERE paid_on <= ?1 GROUP BY customer_phone
+			) p ON p.customer_phone = s.customer_phone
+			LEFT JOIN (
+				-- oldest sale not yet covered by the running total of payments
+				SELECT t.customer_phone, MIN(substr(t.transaction_time, 1, 10)) AS unpaid_date
+				FROM transactions t
+				WHERE t.payment_method = 'CREDIT' AND t.customer_phone IS NOT NULL AND t.customer_phone != ''
+				  AND substr(t.transaction_time, 1, 10) <= ?1
+				  AND (
+					SELECT COALESCE(SUM(t2.total_amount), 0) FROM transactions t2
+					WHERE t2.payment_method = 'CREDIT' AND t2.customer_phone = t.customer_phone
+					  AND t2.transaction_time <= t.transaction_time
+				  ) > (
+					SELECT COALESCE(SUM(p2.amount), 0) FROM credit_payments p2
+					WHERE p2.customer_phone = t.customer_phone AND p2.paid_on <= ?1
+				  )
+				GROUP BY t.customer_phone
+			) oldest ON oldest.customer_phone = s.customer_phone
 			ON CONFLICT (customer_phone, as_of_date) DO UPDATE SET
 				outstanding_amount = excluded.outstanding_amount,
 				transaction_count  = excluded.transaction_count,
 				days_overdue       = excluded.days_overdue,
 				updated_at         = CURRENT_TIMESTAMP
-		`, d, d, d)
+		`, d)
 		if err != nil {
 			return 0, err
 		}
