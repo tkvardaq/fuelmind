@@ -5,35 +5,39 @@ import (
 	"testing"
 )
 
-// TestDetectHardwareTier_AlwaysReturnsValidTier verifies the function
-// always returns one of the four supported tier names regardless of
-// the machine it runs on. The actual mapping is hardware-dependent
-// and tested in TestDetectHardwareTier_Thresholds.
-func TestDetectHardwareTier_AlwaysReturnsValidTier(t *testing.T) {
+func TestDetectHardwareTierReturnsAValidTier(t *testing.T) {
 	tier := DetectHardwareTier()
-	valid := map[string]bool{
-		"basic": true, "standard": true, "enhanced": true, "pro": true,
+	if !ValidTier(tier) {
+		t.Errorf("DetectHardwareTier returned %q", tier)
 	}
-	if !valid[tier] {
-		t.Errorf("DetectHardwareTier returned %q, want one of basic/standard/enhanced/pro", tier)
+	t.Logf("this machine: %d cores, %.1f GiB RAM -> %s", runtime.NumCPU(), TotalRAMGB(), tier)
+}
+
+// Automatic detection never claims a GPU tier: enhanced/pro are opt-in
+// via FUELMIND_HARDWARE_TIER, because a 7B model on a CPU-only shop PC
+// would blow the 8s latency budget.
+func TestTierTable(t *testing.T) {
+	cases := []struct {
+		cores int
+		ram   float64
+		want  string
+	}{
+		{2, 8, TierBasic},
+		{4, 4, TierBasic},
+		{4, 8, TierStandard},
+		{8, 16, TierStandard},
+		{16, 64, TierStandard},
+		{8, 0, TierStandard}, // RAM unknown: decide on cores alone
+	}
+	for _, c := range cases {
+		if got := tierFor(c.cores, c.ram); got != c.want {
+			t.Errorf("tierFor(%d cores, %.0f GiB) = %q, want %q", c.cores, c.ram, got, c.want)
+		}
 	}
 }
 
-// TestDetectHardwareTier_Thresholds verifies the CPU-core threshold
-// mapping for the v1 simplified tier detection.
-func TestDetectHardwareTier_Thresholds(t *testing.T) {
-	cores := runtime.NumCPU()
-	got := DetectHardwareTier()
-	var want string
-	switch {
-	case cores < 4:
-		want = "basic"
-	case cores < 8:
-		want = "standard"
-	default:
-		want = "enhanced"
-	}
-	if got != want {
-		t.Errorf("DetectHardwareTier with %d cores = %q, want %q", cores, got, want)
+func TestValidTier(t *testing.T) {
+	if ValidTier("turbo") || !ValidTier(TierPro) {
+		t.Error("ValidTier is wrong")
 	}
 }

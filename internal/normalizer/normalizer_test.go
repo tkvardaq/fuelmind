@@ -152,9 +152,15 @@ func caseEqual(a, b string) bool {
 	}
 	for i := 0; i < len(a); i++ {
 		ca, cb := a[i], b[i]
-		if ca >= 'A' && ca <= 'Z' { ca += 32 }
-		if cb >= 'A' && cb <= 'Z' { cb += 32 }
-		if ca != cb { return false }
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 32
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 32
+		}
+		if ca != cb {
+			return false
+		}
 	}
 	return true
 }

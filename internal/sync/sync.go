@@ -8,10 +8,11 @@
 //
 // Hard requirement (spec §6 + Phase 5 demo): the cloud is optional.
 // If the cloud is unreachable, the local core must:
-//   1. Log the failure.
-//   2. Cache the last-seen license status (so feature flags are
-//      still readable offline).
-//   3. Retry on the next cycle.
+//  1. Log the failure.
+//  2. Cache the last-seen license status (so feature flags are
+//     still readable offline).
+//  3. Retry on the next cycle.
+//
 // Nothing in the local core's day-to-day work may depend on the
 // cloud being up.
 package sync
@@ -117,12 +118,12 @@ func LicenseTier(ctx context.Context, store *storage.Storage) string {
 // AND what we persist in local_config under ConfigKeyLicenseCache
 // (so the dashboard's feature-flag UI works offline).
 type LicenseStatus struct {
-	StationID    string           `json:"station_id"`
-	Tier         string           `json:"tier"`           // "private" / "connected" / "connected_hq"
-	FeaturesJSON map[string]any   `json:"features_json"`  // see spec §6.2
-	ValidFrom    time.Time        `json:"valid_from"`
-	ValidUntil   *time.Time       `json:"valid_until,omitempty"`
-	Status       string           `json:"status"`         // "active" / "suspended" / "expired"
+	StationID    string         `json:"station_id"`
+	Tier         string         `json:"tier"`          // "private" / "connected" / "connected_hq"
+	FeaturesJSON map[string]any `json:"features_json"` // see spec §6.2
+	ValidFrom    time.Time      `json:"valid_from"`
+	ValidUntil   *time.Time     `json:"valid_until,omitempty"`
+	Status       string         `json:"status"` // "active" / "suspended" / "expired"
 }
 
 // IsFeatureEnabled is the convenience accessor for template/dashboard

@@ -1,46 +1,59 @@
-# FuelMind Makefile
-# Windows users without `make`: just use the go commands directly. CI runs them too.
+# FuelMind Makefile. Windows users without `make` can run the go commands
+# directly; CI runs the same ones.
 
-GO         ?= go
-GOFLAGS    ?= -trimpath
-LDFLAGS    ?= -s -w
-BIN_DIR    ?= dist
-BIN_NAME   ?= fuelmind-core
-PKG        := ./...
+GO       ?= go
+GOFLAGS  ?= -trimpath
+VERSION  ?= dev
+LDFLAGS  ?= -s -w -X main.version=$(VERSION)
+DIST     ?= dist
+PKG      := ./...
 
-.PHONY: help build test run tidy vet fmt clean windows coverage
+.PHONY: help build test test-race lint vet fmt fmt-check run rebuild-mart windows installer clean coverage tidy
 
 help: ## Show this help
-	@for f in $(MAKEFILE_LIST); do \
-		grep -E '^[a-zA-Z_-]+:.*?## .*$$' $$f | awk 'BEGIN{FS=":.*?## "}{printf "  %-12s %s\n", $$1, $$2}'; \
-	done
+	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-13s %s\n", $$1, $$2}'
 
-build: ## Build the local core for the host OS
-	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_NAME) ./cmd/fuelmind-core
+build: ## Build every command for the host OS
+	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST)/ ./cmd/...
 
-test: ## Run all tests with race detector
+test: ## Run all tests
+	$(GO) test -count=1 $(PKG)
+
+test-race: ## Run all tests with the race detector (needs a C compiler)
 	$(GO) test -race -count=1 $(PKG)
-
-run: ## Run the local core on the host
-	$(GO) run ./cmd/fuelmind-core
-
-tidy: ## go mod tidy
-	$(GO) mod tidy
 
 vet: ## go vet
 	$(GO) vet $(PKG)
 
-fmt: ## gofmt -s on all files (write mode)
-	$(GO) fmt $(PKG)
-	@gofmt -s -w .
+fmt: ## Format the tree
+	gofmt -s -w .
 
-windows: ## Cross-compile a Windows .exe into dist/
-	@mkdir -p $(BIN_DIR)
-	GOOS=windows GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BIN_NAME).exe ./cmd/fuelmind-core
+fmt-check: ## Fail if the tree is not gofmt-clean (what CI runs)
+	@out="$$(gofmt -s -l .)"; \
+	if [ -n "$$out" ]; then echo "not gofmt-clean:"; echo "$$out"; exit 1; fi
 
-coverage: ## Run tests and emit an HTML coverage report
-	$(GO) test -coverprofile=$(BIN_DIR)/coverage.out $(PKG)
-	$(GO) tool cover -html=$(BIN_DIR)/coverage.out -o $(BIN_DIR)/coverage.html
+lint: vet fmt-check ## vet + gofmt check
 
-clean: ## Remove dist/
-	rm -rf $(BIN_DIR)
+tidy: ## go mod tidy
+	$(GO) mod tidy
+
+run: ## Run the core against ~/.fuelmind (or FUELMIND_DATA_DIR)
+	$(GO) run ./cmd/fuelmind-core
+
+rebuild-mart: ## Recompute every mart table from transaction history
+	$(GO) run ./cmd/fuelmind-core -rebuild-mart
+
+windows: ## Cross-compile the Windows binaries into dist/
+	GOOS=windows GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST)/FuelMindCore.exe ./cmd/fuelmind-core
+	GOOS=windows GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST)/fuelmind-launcher.exe ./cmd/fuelmind-launcher
+	GOOS=windows GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(DIST)/fuelmind-setup.exe ./cmd/fuelmind-setup
+
+installer: ## Build binaries, update artifact and MSI (Windows + WiX v3)
+	powershell -ExecutionPolicy Bypass -File installer/build.ps1 -Version $(VERSION)
+
+coverage: ## HTML coverage report
+	$(GO) test -coverprofile=$(DIST)/coverage.out $(PKG)
+	$(GO) tool cover -html=$(DIST)/coverage.out -o $(DIST)/coverage.html
+
+clean: ## Remove build output
+	rm -rf $(DIST)

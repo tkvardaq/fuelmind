@@ -1,98 +1,199 @@
+// Command fuelmind-setup is the station support tool. Run it on the shop
+// PC as administrator.
+//
+//	fuelmind-setup status          show station id, tier, data dir, POS folder
+//	fuelmind-setup reset-pin       set a new dashboard PIN (prompts twice)
+//	fuelmind-setup test-heartbeat  send one heartbeat to the configured cloud
+//
+// The dashboard's own /setup page handles the first PIN; this tool exists
+// for "the owner forgot the PIN" and for on-site diagnosis.
 package main
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fuelmind/fuelmind/internal/auth"
 	"github.com/fuelmind/fuelmind/internal/config"
 	"github.com/fuelmind/fuelmind/internal/hardware"
+	"github.com/fuelmind/fuelmind/internal/ident"
 	"github.com/fuelmind/fuelmind/internal/storage"
+	"github.com/fuelmind/fuelmind/internal/sync"
 )
 
 func main() {
-	fmt.Println("=== FuelMind First-Run Wizard ===")
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "fuelmind-setup:", err)
+		os.Exit(1)
+	}
+}
 
-	// Load config to get the data directory and DB path.
+func usage() error {
+	return errors.New("usage: fuelmind-setup status | reset-pin | test-heartbeat")
+}
+
+func run(args []string) error {
+	if len(args) != 1 {
+		return usage()
+	}
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Printf("Failed to load config: %v\n", err)
-		os.Exit(1)
+		return err
 	}
-
-	// Open the storage (SQLite) using the path from config.
 	store, err := storage.Open(cfg.Path)
 	if err != nil {
-		fmt.Printf("Failed to open storage: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("cannot open %s: %w", cfg.Path, err)
 	}
 	defer store.Close()
-
-	// Run any pending migrations (creates dashboard_users, etc.)
-	if err := store.Migrate(context.Background()); err != nil {
-		fmt.Printf("Failed to run migrations: %v\n", err)
-		os.Exit(1)
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		return fmt.Errorf("migrations: %w", err)
 	}
 
-	// 1. PIN setup
-	reader := bufio.NewReader(os.Stdin)
-	authService := auth.New(store)
-	for {
-		fmt.Print("Enter a new PIN (minimum 4 digits): ")
-		pinInput, _ := reader.ReadString('\n')
-		pinInput = strings.TrimSpace(pinInput)
-		if len(pinInput) < 4 {
-			fmt.Println("PIN must be at least 4 digits. Try again.")
-			continue
-		}
-		// Store PIN using auth package
-		if err := authService.SetupPIN(context.Background(), pinInput); err != nil {
-			fmt.Printf("Failed to set PIN: %v\n", err)
-			continue
-		}
-		fmt.Println("PIN set successfully.")
-		break
+	switch args[0] {
+	case "status":
+		return status(ctx, store, cfg)
+	case "reset-pin":
+		return resetPIN(ctx, store)
+	case "test-heartbeat":
+		return testHeartbeat(ctx, store, cfg)
+	default:
+		return usage()
 	}
+}
 
-	// 2. Hardware tier detection
-	tier := hardware.DetectHardwareTier()
-	fmt.Printf("Detected hardware tier: %s\n", tier)
-
-	// Persist hardware tier in local config (if not already)
-	existing, err := store.GetLocalConfig(context.Background(), "hardware_tier")
-	if err != nil && err != storage.ErrNotFound {
-		fmt.Printf("Warning: failed to check existing hardware tier: %v\n", err)
-	} else if err == nil {
-		// Already set, skip
-		fmt.Printf("Hardware tier already set to %s\n", existing.Value)
+func status(ctx context.Context, store *storage.Storage, cfg *config.Config) error {
+	tier := store.LocalConfigValue(ctx, ident.ConfigKeyHardwareTier, hardware.DetectHardwareTier())
+	fmt.Println("FuelMind station status")
+	fmt.Println("  station id:   ", store.LocalConfigValue(ctx, ident.ConfigKeyStationID, "(not generated yet)"))
+	fmt.Println("  licence tier: ", sync.LicenseTier(ctx, store))
+	fmt.Println("  hardware tier:", tier)
+	fmt.Println("  data dir:     ", cfg.DataDir)
+	fmt.Println("  dashboard:     http://localhost:" + fmt.Sprint(cfg.Port) + "/")
+	if cfg.SyncEnabled {
+		fmt.Println("  cloud:        ", cfg.CloudURL)
 	} else {
-		// Not set, store it
-		if err := store.SetLocalConfig(context.Background(), "hardware_tier", string(tier), "", false); err != nil {
-			fmt.Printf("Warning: failed to persist hardware tier: %v\n", err)
-		} else {
-			fmt.Println("Hardware tier saved.")
+		fmt.Println("  cloud:         not configured (local-only)")
+	}
+	fmt.Println("  telemetry:    ", store.LocalConfigValue(ctx, sync.ConfigKeyTelemetryConsent, "false"))
+
+	// POS drop folder: exists, writable, and what is waiting in it.
+	drop := filepath.Join(cfg.DataDir, "pos_drop")
+	pending, ferr := countCSVs(drop)
+	switch {
+	case ferr != nil:
+		fmt.Println("  POS folder:    NOT USABLE:", ferr)
+	default:
+		failed, _ := countCSVs(filepath.Join(drop, "failed"))
+		processed, _ := countCSVs(filepath.Join(drop, "processed"))
+		fmt.Printf("  POS folder:    %s (%d waiting, %d processed, %d failed)\n", drop, pending, processed, failed)
+	}
+	if last, err := store.LastPosIngestionAt(ctx); err == nil && !last.IsZero() {
+		fmt.Println("  last POS file:", last.Local().Format(time.RFC1123))
+	} else {
+		fmt.Println("  last POS file: none ingested yet")
+	}
+	if unresolved, err := store.UnresolvedProducts(ctx); err == nil && len(unresolved) > 0 {
+		fmt.Println("  unknown product names (rows are kept, add an alias to import them):")
+		for _, u := range unresolved {
+			fmt.Printf("    %-24s %d row(s)\n", u.Alias, u.Rows)
 		}
 	}
-
-	// 3. POS connection test (placeholder)
-	fmt.Print("Testing POS connection (placeholder)... ")
-	// In a real implementation, we would attempt to read from the POS adapter.
-	fmt.Println("OK (placeholder)")
-
-	// 4. Test heartbeat button (prompt)
-	fmt.Print("Would you like to send a test heartbeat now? (y/N): ")
-	resp, _ := reader.ReadString('\n')
-	resp = strings.TrimSpace(strings.ToLower(resp))
-	if resp == "y" || resp == "yes" {
-		fmt.Println("Sending test heartbeat...")
-		// Use sync agent to send a heartbeat (maybe a dry-run)
-		// For simplicity, we just call the heartbeat endpoint if configured.
-		// This is a placeholder; actual implementation would use sync.SendHeartbeat.
-		fmt.Println("Test heartbeat sent (placeholder).")
+	if a, err := store.LatestSyncAttempt(ctx); err == nil {
+		fmt.Printf("  last heartbeat: %s (%s %s)\n", a.SentAt.Local().Format(time.RFC1123), a.Status, a.Reason)
 	}
+	return nil
+}
 
-	fmt.Println("\nSetup complete. The FuelMind service will start automatically.")
+func countCSVs(dir string) (int, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".csv") {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func resetPIN(ctx context.Context, store *storage.Storage) error {
+	pin, err := readPIN("New dashboard PIN (8 or more characters): ")
+	if err != nil {
+		return err
+	}
+	again, err := readPIN("Repeat the PIN: ")
+	if err != nil {
+		return err
+	}
+	if pin != again {
+		return errors.New("the two PINs do not match; nothing was changed")
+	}
+	if err := auth.New(store).SetupPIN(ctx, pin); err != nil {
+		return err
+	}
+	if err := store.DeleteAllSessions(ctx); err != nil {
+		return fmt.Errorf("PIN changed, but signing other devices out failed: %w", err)
+	}
+	fmt.Println("PIN updated. Everyone signed in on other devices has been signed out.")
+	return nil
+}
+
+// readPIN reads one line without echoing it, and fails on EOF instead of
+// looping (so a silent/unattended run cannot spin forever).
+func readPIN(prompt string) (string, error) {
+	fmt.Print(prompt)
+	line, err := readLineNoEcho(os.Stdin)
+	fmt.Println()
+	if err != nil {
+		return "", err
+	}
+	pin := strings.TrimSpace(line)
+	if len(pin) < auth.MinPINLength {
+		return "", auth.ErrPINTooShort
+	}
+	return pin, nil
+}
+
+func readLine(f *os.File) (string, error) {
+	line, err := bufio.NewReader(f).ReadString('\n')
+	if err != nil && line == "" {
+		return "", errors.New("no input (run this tool in a console)")
+	}
+	return line, nil
+}
+
+func testHeartbeat(ctx context.Context, store *storage.Storage, cfg *config.Config) error {
+	if !cfg.SyncEnabled {
+		return errors.New("no cloud configured (FUELMIND_CLOUD_URL is unset), so there is nothing to contact")
+	}
+	sid := store.LocalConfigValue(ctx, ident.ConfigKeyStationID, "")
+	key := store.LocalConfigValue(ctx, ident.ConfigKeyAPIKey, "")
+	if sid == "" || key == "" {
+		return errors.New("this station has no identity yet; start the FuelMind service once first")
+	}
+	agent := sync.NewAgent(sync.AgentConfig{
+		Store:           store,
+		Client:          sync.NewHTTPClient(cfg.CloudURL),
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		Identity:        ident.Identity{StationID: ident.StationID(sid), APIKey: ident.APIKey(key)},
+		SoftwareVersion: "setup-tool",
+	})
+	fmt.Printf("Sending a heartbeat to %s ...\n", cfg.CloudURL)
+	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := agent.SendOnce(sendCtx); err != nil {
+		return fmt.Errorf("heartbeat failed: %w", err)
+	}
+	fmt.Println("Heartbeat accepted. Licence tier:", sync.LicenseTier(ctx, store))
+	return nil
 }

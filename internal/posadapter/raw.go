@@ -17,11 +17,11 @@ const (
 // raw_pos_transactions. The Payload is the original, untouched bytes —
 // we never parse/normalize at this layer (see spec §2.3).
 type RawTransaction struct {
-	PosSourceID string       // which POS / lane it came from (e.g. "lane_1")
-	ExternalID  string       // the POS's own ID for this transaction, if any
-	OccurredAt  time.Time    // when the POS says the transaction happened
-	Payload     []byte       // original JSON/CSV row, untouched
-	PayloadKind PayloadKind  // hint for the normalizer
+	PosSourceID string      // which POS / lane it came from (e.g. "lane_1")
+	ExternalID  string      // the POS's own ID for this transaction, if any
+	OccurredAt  time.Time   // when the POS says the transaction happened
+	Payload     []byte      // original JSON/CSV row, untouched
+	PayloadKind PayloadKind // hint for the normalizer
 }
 
 // RawInventory is the raw inventory snapshot from a tank gauge.

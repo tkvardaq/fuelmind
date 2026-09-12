@@ -93,7 +93,7 @@ func computeScore(ctx context.Context, db *sql.DB, date string) (score, error) {
 	if highCredit > 0 {
 		s.credit = 60
 		s.issues = append(s.issues, issue{Date: date, Category: "credit", Severity: "alert",
-			Code: "high_credit_outstanding",
+			Code:    "high_credit_outstanding",
 			Message: fmt.Sprintf("%d customer(s) owe more than PKR 50,000 on credit.", highCredit)})
 	}
 
@@ -126,12 +126,12 @@ func computeScore(ctx context.Context, db *sql.DB, date string) (score, error) {
 			s.dataQuality = 80
 		}
 		s.issues = append(s.issues, issue{Date: date, Category: "data", Severity: "warn",
-			Code: "total_mismatch",
+			Code:    "total_mismatch",
 			Message: fmt.Sprintf("%d sale(s) where quantity × price does not match the total charged.", mismatched)})
 	}
 	if negative > 0 {
 		s.issues = append(s.issues, issue{Date: date, Category: "data", Severity: "info",
-			Code: "negative_quantity",
+			Code:    "negative_quantity",
 			Message: fmt.Sprintf("%d sale(s) with a negative quantity (refunds or corrections).", negative)})
 	}
 

@@ -19,7 +19,7 @@ Every architectural decision in this repo serves that rule.
 ```
                 ┌────────────────────────────────────┐
                 │       Dashboard (Phase 4)          │   served on
-                │       http://localhost:8765        │   localhost
+                │       http://shop-pc:8765          │   LAN
                 └────────────┬───────────────────────┘
                              │ reads only
                 ┌────────────▼───────────────────────┐
@@ -48,21 +48,42 @@ Every architectural decision in this repo serves that rule.
 ## Hard rules
 
 1. **The LLM never computes numbers.** It only explains pre-computed
-   values from the data mart. Enforced in code (post-generation regex
-   check) and in the system prompt.
-2. **Raw is immutable.** `raw_pos_transactions` rows are never updated
-   or deleted by anything. The normalizer reads from raw and writes to
-   normalized; if normalized data is wrong, the normalizer is re-run.
-3. **Migrations have up + down.** Every schema change has a tested
-   rollback. The update mechanism never ships a migration without one.
-4. **The local core runs under `NT AUTHORITY\LocalService` (or the
-   POSIX equivalent).** No admin-equivalent. Data folder ACL restricts
-   write to the service account.
-5. **The dashboard requires a PIN.** We do not rely on "it's on the
-   local network" as access control.
-6. **No `fmt.Println` outside `main.go` and tests.** Everything is
-   `slog` so we can ship the same logs to stderr (dev) and a rotating
-   file (production).
+   values from the data mart. Enforced twice: the system prompt says so,
+   and `llm.ungroundedNumbers` drops any reply containing a number that
+   is not in the context block it was given.
+2. **Raw is immutable.** `raw_pos_transactions` rows are never updated or
+   deleted. When a POS re-exports a transaction, the *normalized* row is
+   replaced and the superseded raw row is recorded in `raw_superseded`;
+   both raw rows stay for audit.
+3. **Migrations have up + down, and run in a transaction.** A migration
+   that fails part-way leaves no schema behind, and an existing database
+   is copied to `backups\pre-migrate-*.db` before the first pending
+   migration runs.
+4. **The service runs under `NT AUTHORITY\LocalService`.** No admin
+   rights. The data folder ACL grants LocalService, Administrators and
+   SYSTEM only.
+5. **The dashboard requires a PIN**, locks after five wrong attempts, and
+   only lets the *first* PIN be set from the shop PC itself. It listens
+   on the LAN because the owner uses a phone; "it is on the local
+   network" is never the access control.
+6. **The station works with the internet unplugged.** Cloud calls are
+   licensing, updates and (opt-in) health only. Health data is sent only
+   with the owner's consent.
+7. **No `fmt.Println` outside `main` packages and tests.** Everything is
+   `slog`, so the same logs go to stderr in dev and to
+   `logs\core.log` under the service.
+
+## Layout on a station
+
+```
+%ProgramFiles%\FuelMind\   launcher (service), core, setup tool
+%ProgramData%\FuelMind\    fuelmind.db, pos_drop\, versions\, backups\, logs\
+                           current.json / previous.json / pending.json
+```
+
+The launcher supervises the core, swaps versions on request (core exit
+code 42), verifies the new version with `/healthz`, and rolls back on a
+failed self-check or a crash loop.
 
 ## Cross-references
 

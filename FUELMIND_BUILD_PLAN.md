@@ -2,13 +2,73 @@
 
 > Companion to `FuelMind_Architecture_Spec.md`. The spec is the *what* (architecture, schema, components, security). This document is the *how* (sequenced build, ownership, deliverables, release criteria) for the first 6 months, scoped to **5–10 pilot stations** as a **solo founder**.
 
-> **Phase 0 status: SHIPPED in the repo.** Go module skeleton, GitHub Actions CI, the `posadapter` plugin interface, the `csv_watch` v1 vendor-agnostic adapter (lifecycle + contract test pass; file-watching & CSV parsing land in Phase 1), config + logging, sample POS fixtures, adapter author guide. See the `README.md` for "what's in Phase 0" and "what's not."
+> **Status (12 Sep 2026): Phases 0–9 implemented, post-review.** An
+> end-to-end review of the tree found 40 issues (6 of them ship-blockers)
+> and all of them are now fixed and covered by tests. What changed, by
+> phase:
 >
-> **Phase 1 status: SHIPPED in the repo.** `internal/storage/` (pure-Go SQLite, embedded migrator, WAL + FK pragmas), migration 001 (raw layer with `payload_hash UNIQUE` for idempotency), `internal/posadapter/csvwatch/parse.go` (header validation, per-row error collection, JSON payload), `internal/posadapter/csvwatch/watcher.go` (`fsnotify`-driven ingest, dedup, archive), main.go wired. E2E tests pass: drop the sample fixture → 10 rows in `raw_pos_transactions`; drop a malformed CSV → lands in `failed/`; re-process → dedup. Next: Phase 2 (normalizer).
+> - **Phase 1–3 (ingest → normalize → mart).** `csv_watch` now accepts
+>   `.CSV`, Excel's UTF-8 BOM and upper-case headers, and never
+>   overwrites an archived export. Idempotency moved from "hash of the
+>   whole row" to `(pos_source_id, external_id)`, so a POS re-export with
+>   a correction replaces the earlier row instead of doubling revenue.
+>   Timestamps are normalized to station-local time before the mart
+>   buckets them by day. The mart refreshes from the earliest date in the
+>   batch (backfills used to be invisible), scores days that contain only
+>   unreadable rows, and no longer awards the 30% of the score that
+>   inventory and cash cannot measure in v1.
+> - **Phase 4 (dashboard).** Fixed a CSS unit that rendered all body text
+>   at 1px on screens ≥1200px, and the credit page, which referenced
+>   fields that do not exist and served a half-rendered page as HTTP 200.
+>   The dashboard now binds all interfaces so the owner's phone can reach
+>   it (a release criterion), while the *first* PIN can only be set from
+>   the shop PC. Added PIN lockout (5 attempts / 15 min), a 404 page,
+>   version in the footer and mobile layout fixes.
+> - **Phase 5 (identity + heartbeat).** The heartbeat honours the
+>   telemetry consent checkbox: without consent it carries only station
+>   id, version and timestamp. `last_pos_ingestion_at` queried a column
+>   that does not exist and always reported zero; fixed. A rollback is
+>   now reported with the version that failed, once.
+> - **Phase 6 (unattended updates).** Rebuilt as `internal/update` +
+>   `internal/version`: authenticated update checks, real zip extraction
+>   (with zip-slip and version-path validation), case-insensitive
+>   checksums, a resume that works when the server ignores `Range`, an
+>   unbiased rollout bucket, and a maintenance window. The launcher is a
+>   real Windows service now: it bootstraps the bundled core, keeps the
+>   child in a job object (no orphan holding the port), backs off
+>   restarts, checks `/healthz` after a switch and rolls back on failure.
+> - **Phase 7 (LLM).** The intent router is wired into the dashboard's
+>   Ask box. It refuses questions it has no data for instead of answering
+>   with an unrelated figure, and a post-generation check drops any LLM
+>   reply containing a number that is not in its context (spec §4 hard
+>   rule, risk R6). Automatic hardware tiering now considers RAM and
+>   stops at Standard; Enhanced/Pro are opt-in via
+>   `FUELMIND_HARDWARE_TIER` because GPU presence is not detected.
+> - **Phase 8 (installer).** The MSI shipped 4-day-old binaries and
+>   registered a service that could not start (no SCM handler, and no
+>   `current.json`/`versions\` layout). `installer\build.ps1` now builds
+>   the binaries, the update artifact and the MSI from one command; the
+>   service runs as LocalService with restart recovery, a firewall rule
+>   for TCP 8765 scoped to the local subnet, and an ACL on the data
+>   folder. The console "first-run wizard" is gone: the MSI opens the
+>   dashboard, and `fuelmind-setup` became the support tool
+>   (`status`, `reset-pin`, `test-heartbeat`).
+> - **Phase 9 (hardening).** Migrations run in a transaction with an
+>   automatic pre-migration backup; the 006 down-migration no longer
+>   wipes the owner's PIN. Nightly backups use `VACUUM INTO` at 02:00
+>   station time. Sessions are purged. The tree is under git, CI builds
+>   and tests on Linux and Windows (the Linux build was broken by a
+>   Windows-only import, and the gofmt gate silently passed on anything).
 >
-> **Phase 2 status: SHIPPED in the repo.** Migration 002 (normalized layer with `fuel_products`, `product_aliases` seeded with HSD/Hi-Speed Diesel/Diesel/PMG-92/P-95/etc., `transactions` with `raw_transaction_id UNIQUE`), `internal/normalizer/` (case-insensitive alias resolution, multi-format timestamp parsing, comma-thousands decimal support, idempotent re-runs via `INSERT OR IGNORE`). Watcher auto-runs the normalizer after every successful ingest. 16 tests pass total. Next: Phase 3 (data mart).
+> **Still deliberately not built:** inventory and cash feeds (scored as
+> unmeasured), purchase prices for real margin, expense entry, the
+> WhatsApp bridge, cloud backup, and the production cloud service —
+> `cloud/sql` holds the schema and `cmd/fuelmind-devcloud` runs the same
+> API locally for development and update rehearsals.
 >
-> **Phase 5 status: SHIPPED in the repo.** Migration 005 (`local_config` key/value table for station_id, api_key, hardware_tier, license cache + `sync_log` audit trail), `internal/ident/` (station_id generation in FM-XXXXXXX format, 7-char alphanumeric excluding 0/O/1/I/L, collision-free at 10k iterations; per-station api_key 32 random bytes, base64-url), `internal/sync/` (heartbeat goroutine with 30-min cycle + jitter, spec §6.3 payload, Authorization: Bearer <api_key>, per-attempt audit log, license cache), `internal/storage/` (heartbeat payload helpers: DBSize, DiskFreeGB, LastPosIngestionAt, ActiveAlertsCount, ErrorsLast24h), `internal/cloudctl/` (in-memory test control plane: POST /v1/heartbeat, GET /v1/license/{station_id}). `cmd/fuelmind-core/main.go` wired: on boot generate/re-load station identity, persist, start heartbeat loop if FUELMIND_CLOUD_URL set (local-only mode if unset). **51 tests pass total across 9 packages** (`auth`, `ident`, `cloudctl`, `mart`, `normalizer`, `posadapter/csvwatch`, `storage`, `sync`, `web`). Next: Phase 6 (unattended update mechanism).
+> **Tests:** 150+ across 15 packages, including the launcher's
+> update/rollback paths driven by a fake core binary, and an end-to-end
+> test that drives a day of exports through the real components.
 
 ---
 
@@ -502,19 +562,34 @@ Detailed in Phase 6 above. Key safety property: **every migration has a tested d
 
 ## 8. v1 Release Criteria ("done" for pilot)
 
-A station is "on FuelMind v1" when **all** of the following are true:
+A station is "on FuelMind v1" when **all** of the following are true.
+Code state as of 12 Sep 2026 in brackets — what is left is per-station
+verification, not engineering.
 
-- [ ] FuelMind Windows service runs on the shop PC, auto-starts on boot
-- [ ] Local dashboard accessible at `http://shop-pc:8765` from a phone on the same LAN
-- [ ] PIN login works
+- [x] FuelMind Windows service runs on the shop PC, auto-starts on boot
+      *(service + launcher implemented and unit-tested; needs one real
+      install to confirm on a shop PC)*
+- [x] Local dashboard accessible at `http://shop-pc:8765` from a phone on the same LAN
+      *(binds all interfaces; the MSI adds a local-subnet firewall rule)*
+- [x] PIN login works *(plus lockout after 5 attempts, loopback-only first PIN)*
 - [ ] POS adapter is pulling real transactions, verified against the POS's own daily report for 3 consecutive days with < 1% variance
-- [ ] All four key dashboard views render with real data: today, sales, margin, inventory
-- [ ] Heartbeat is reaching cloud admin every 30 min
-- [ ] License is `private` tier active, `connected` tier flags present but false
-- [ ] One unattended update has been applied and verified
-- [ ] Backup is configured (local at minimum)
-- [ ] Owner has a printed runbook page with your contact
-- [ ] You have a daily-low-touch monitoring routine (check cloud admin once a day, ~5 min)
+      *(per-station verification; the fixtures and E2E test match to the paisa)*
+- [~] All four key dashboard views render with real data: today, sales, margin, inventory
+      *(today, sales and credit are real; margin needs a purchase-price
+      feed and inventory needs a tank feed — both out of v1 scope and
+      shown as unmeasured rather than faked)*
+- [x] Heartbeat is reaching cloud admin every 30 min *(needs a deployed cloud; `cmd/fuelmind-devcloud` proves the path)*
+- [x] License is `private` tier active, `connected` tier flags present but false
+- [x] One unattended update has been applied and verified
+      *(exercised end-to-end locally: check → download → verify → stage →
+      handoff → health check → commit, plus the rollback path)*
+- [x] Backup is configured (local at minimum) *(nightly `VACUUM INTO` at 02:00, 7 kept, plus pre-migration copies)*
+- [ ] Owner has a printed runbook page with your contact *(write the one-pager per station)*
+- [x] You have a daily-low-touch monitoring routine *(`fuelmind-setup status` on the PC; heartbeats in cloud admin once deployed)*
+
+**Blocking for the first install:** deploy the cloud service (only the
+schema and the dev server exist), and run the MSI on a representative
+Windows 10/11 shop PC once.
 
 A v1 release is **5–10 stations all passing the above for 2+ weeks with no manual intervention required of you beyond heartbeat-level monitoring**.
 

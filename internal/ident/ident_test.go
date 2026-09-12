@@ -76,20 +76,20 @@ func TestIsValidStationID(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"",                       // empty
-		"FM-",                    // missing suffix
-		"FM-2345",                // too short (4)
-		"FM-234567",              // too short (6, but production is 7)
-		"FM-23456789",            // too long (8)
-		"fm-2345678",             // wrong prefix case
-		"FM-1234567",             // has 1 (excluded)
-		"FM-IO234567",            // has I (excluded)
-		"FM-OL234567",            // has O (excluded)
-		"FM-LL234567",            // has L (excluded)
-		"FM-2345!!!",             // punctuation
-		"FM-234 678",             // space
-		"FM-2345678\n",           // trailing newline
-		"XX-2345678",             // wrong prefix
+		"",             // empty
+		"FM-",          // missing suffix
+		"FM-2345",      // too short (4)
+		"FM-234567",    // too short (6, but production is 7)
+		"FM-23456789",  // too long (8)
+		"fm-2345678",   // wrong prefix case
+		"FM-1234567",   // has 1 (excluded)
+		"FM-IO234567",  // has I (excluded)
+		"FM-OL234567",  // has O (excluded)
+		"FM-LL234567",  // has L (excluded)
+		"FM-2345!!!",   // punctuation
+		"FM-234 678",   // space
+		"FM-2345678\n", // trailing newline
+		"XX-2345678",   // wrong prefix
 	}
 	for _, s := range bad {
 		if IsValidStationID(s) {

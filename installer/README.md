@@ -1,37 +1,58 @@
-# FuelMind Windows Installer (WiX)
+# FuelMind installer (WiX v3)
 
-This directory contains the WiX source for building a Windows MSI installer for FuelMind.
+## Build
 
-## Prerequisites
-- WiX Toolset v3.11 or later (https://wixtoolset.org/)
-- Built FuelMind binaries (`fuelmind-core.exe` and `fuelmind-launcher.exe`) from the `cmd` directories.
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\build.ps1 -Version 1.1.0
+```
 
-## Building the MSI
-1. Ensure the binaries are built and placed in their default output locations:
-   - `..\cmd\fuelmind-core\fuelmind-core.exe`
-   - `..\cmd\fuelmind-launcher\fuelmind-launcher.exe`
-2. Optionally run `heat` to harvest files automatically, but the current `product.wxs` uses explicit file references.
-3. From this directory, run:
-   ```cmd
-   candle product.wxs
-   light product.wixobj -out FuelMind-Installer.msi
-   ```
-4. The resulting MSI can be deployed via standard Windows installation mechanisms.
+That compiles the binaries into `dist\` first, so the MSI can never ship
+a stale executable, then produces:
 
-## Installer Features
-- Installs `fuelmind-core.exe` and `fuelmind-launcher.exe` to `Program Files\FuelMind`.
-- Installs a Windows Service named **FuelMind Service** that runs `fuelmind-launcher.exe` under the `NT AUTHORITY\LocalService` account.
-- Creates a data folder under `%LOCALAPPDATA%\FuelMind` for local state.
-- Includes a placeholder for a first-run wizard (to be implemented as a separate executable launched via a custom action after install).
+- `dist\FuelMind-<version>.msi`
+- `dist\fuelmind-core-<version>.zip` and `.sha256` — the artifact for the
+  update endpoint
 
-## Next Steps for Phase 8
-- Implement the first-run wizard (PIN setup, POS connection test, hardware tier display, test heartbeat button) as a standalone executable (e.g., `fuelmind-setup.exe`).
-- Add a custom action in `product.wxs` to launch the wizard after install.
-- Refine service configuration to ensure proper start type and recovery options.
-- Add upgrade and uninstall logic.
-- Localize and add EULA if needed.
+Requirements: Go, and WiX Toolset v3 (the script looks in `%WIX%\bin`,
+then `%LOCALAPPDATA%\WiX\tools`).
+
+## What the MSI does
+
+- Installs `fuelmind-launcher.exe`, `FuelMindCore.exe` and
+  `fuelmind-setup.exe` into `%ProgramFiles%\FuelMind\`.
+- Registers the service **FuelMindService** running
+  `fuelmind-launcher.exe` as `NT AUTHORITY\LocalService`, automatic
+  start, with restart-on-failure recovery.
+- Creates `%ProgramData%\FuelMind\` granting full access to LocalService,
+  Administrators and SYSTEM only.
+- Adds a firewall rule for TCP 8765, scoped to the local subnet, so the
+  owner's phone can open the dashboard.
+- Opens `http://localhost:8765/` after installing, where the owner sets
+  the first PIN (only possible from the shop PC).
+
+On first start the launcher copies the installed `FuelMindCore.exe` into
+`%ProgramData%\FuelMind\versions\<version>\` and points `current.json` at
+it. A later MSI with a newer core is adopted the same way, keeping the
+old version as the rollback target.
+
+## Install and uninstall
+
+```powershell
+msiexec /i dist\FuelMind-1.1.0.msi /qb        # install
+msiexec /i dist\FuelMind-1.1.0.msi /qn        # silent
+msiexec /x dist\FuelMind-1.1.0.msi /qb        # uninstall (keeps the data folder)
+```
+
+Verify:
+
+```powershell
+sc query FuelMindService
+"C:\Program Files\FuelMind\fuelmind-setup.exe" status
+```
 
 ## Notes
-- The current `product.wxs` uses hard-coded relative paths; consider using HeatDirectory to automate file harvesting.
-- Ensure the service binary (`fuelmind-launcher.exe`) is designed to run as a service (handles start/stop commands).
-- The installer currently sets the service account to `[LocalSystem]`; change to `LocalService` as required.
+
+- `ProductVersion` comes from `-Version`; ship a new version for every
+  build so upgrades replace the old install.
+- The data folder is deliberately left behind on uninstall: it holds the
+  station's sales history. Delete it by hand to remove everything.

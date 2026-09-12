@@ -55,3 +55,33 @@ When a real station's POS exports a file, sanitize it and drop it here
 **after** removing or pseudonymizing any PII (customer names, real phone
 numbers, exact card last-4, etc.). The fixture corpus is the most
 durable test asset in the project — invest in keeping it realistic.
+
+## What the reader accepts (v1)
+
+- **File name:** any `*.csv`, case-insensitive (`EXPORT.CSV` works).
+- **Encoding:** UTF-8, with or without the byte-order mark Excel adds
+  when you "Save as CSV UTF-8".
+- **Header names:** matched case-insensitively, spaces trimmed. Column
+  order does not matter; the optional columns may be missing.
+- **Timestamps:** `2026-09-07T08:14:22`, `2026-09-07 08:14:22`, or full
+  RFC 3339 with an offset. Values without an offset are read as station
+  local time, and every stored timestamp is converted to station local
+  time so a day means the station's business day.
+- **Numbers:** `3443.75` or `"3,443.75"`.
+
+## Idempotency
+
+`(pos_source_id, external_id)` identifies a transaction. Re-exporting the
+same day is safe: a row that was already imported is *replaced* by the
+newer copy (so corrections such as a late attendant name are picked up),
+never counted twice. Byte-identical rows are skipped even earlier, on the
+raw layer's `payload_hash`.
+
+## When a row cannot be read
+
+The whole file goes to `failed\` only for file-level problems (a missing
+column, an unreadable header). Individual rows that fail later — an
+unknown `product_alias`, for instance — are kept in the raw layer,
+counted against the day's data-quality score, listed on the dashboard and
+by `fuelmind-setup status`, and imported automatically once an alias is
+added. Nothing is silently dropped.

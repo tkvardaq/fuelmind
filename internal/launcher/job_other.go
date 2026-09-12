@@ -8,6 +8,6 @@ import "os"
 // production; this keeps the package buildable for CI on Linux).
 type jobObject struct{}
 
-func newJobObject() (*jobObject, error)    { return &jobObject{}, nil }
+func newJobObject() (*jobObject, error)       { return &jobObject{}, nil }
 func (j *jobObject) assign(*os.Process) error { return nil }
 func (j *jobObject) close()                   {}
