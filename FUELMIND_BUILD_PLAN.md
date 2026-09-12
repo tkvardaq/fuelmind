@@ -66,7 +66,7 @@
 > `cloud/sql` holds the schema and `cmd/fuelmind-devcloud` runs the same
 > API locally for development and update rehearsals.
 >
-> **Tests:** 150+ across 15 packages, including the launcher's
+> **Tests:** 133 across 15 packages, including the launcher's
 > update/rollback paths driven by a fake core binary, and an end-to-end
 > test that drives a day of exports through the real components.
 

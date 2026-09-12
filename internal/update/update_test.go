@@ -314,3 +314,33 @@ func TestCheckRejectsAnInvalidManifest(t *testing.T) {
 		t.Error("a manifest with a path-traversal version was accepted")
 	}
 }
+
+// A release that already failed here (rolled back by the launcher) must
+// never be downloaded again, or a bad release flaps forever: install,
+// crash, roll back, re-install.
+func TestQuarantinedVersionIsNotReinstalled(t *testing.T) {
+	base := t.TempDir()
+	art, sum := makeArtifact(t, t.TempDir(), "broken core")
+	srv := stubCloud(t, &Release{Version: "1.3.0", ArtifactURL: "/artifacts/a.zip", ChecksumSHA256: sum, RolloutPct: 100}, art)
+	a := newTestAgent(t, base, srv.URL, AnyTime, func() {})
+
+	// First offer: staged as usual.
+	if staged, err := a.Tick(context.Background()); err != nil || staged {
+		t.Fatalf("first tick: staged=%v err=%v", staged, err)
+	}
+	// The launcher rolls it back, which quarantines it.
+	if err := launcher.QuarantineForTest(base, "1.3.0", "crash loop"); err != nil {
+		t.Fatal(err)
+	}
+	_ = launcher.DeletePending(base)
+	if err := os.RemoveAll(filepath.Join(launcher.VersionsDir(base), "1.3.0")); err != nil {
+		t.Fatal(err)
+	}
+
+	if staged, err := a.Tick(context.Background()); err != nil || staged {
+		t.Fatalf("second tick: staged=%v err=%v", staged, err)
+	}
+	if _, err := os.Stat(launcher.CoreBinaryPath(base, "1.3.0")); err == nil {
+		t.Error("a version that was rolled back here was installed again")
+	}
+}

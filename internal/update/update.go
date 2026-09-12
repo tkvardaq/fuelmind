@@ -217,6 +217,12 @@ func (a *Agent) check(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("update check: invalid version %q in manifest", rel.Version)
 	case version.Compare(rel.Version, a.cfg.Version) <= 0:
 		return nil, nil
+	case launcher.IsVersionQuarantined(a.cfg.BaseDir, rel.Version):
+		// This version already failed here and was rolled back; do
+		// not install it again (support clears the quarantine by
+		// deleting data\failed_versions.json).
+		a.cfg.Logger.Warn("skipping a release that previously failed on this station", "version", rel.Version)
+		return nil, nil
 	case !version.InRollout(a.cfg.Identity.StationID.String(), rel.RolloutPct):
 		a.cfg.Logger.Info("update not yet rolled out to this station", "version", rel.Version, "rollout_pct", rel.RolloutPct)
 		return nil, nil

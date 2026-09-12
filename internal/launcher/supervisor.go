@@ -324,6 +324,9 @@ func (s *Supervisor) rollback(failed, reason string) (string, bool) {
 		return "", false
 	}
 	_ = DeletePending(s.opt.BaseDir)
+	if err := quarantineVersion(s.opt.BaseDir, failed, reason); err != nil {
+		s.log.Printf("quarantine %s: %v", failed, err)
+	}
 	if err := writeRollbackRecord(s.opt.BaseDir, failed, reason); err != nil {
 		s.log.Printf("write rollback record: %v", err)
 	}
