@@ -11,6 +11,14 @@
   </div>
   {{end}}
 
+  {{if .Unreadable}}
+  <div class="notice" role="status">
+    {{.Unreadable}} POS row(s) could not be read and are not counted in any figure below.
+    Most recent reason: <code>{{.UnreadableWhy}}</code>.
+    The rows are kept, so they will be counted once the export is corrected.
+  </div>
+  {{end}}
+
   {{if gt .Totals.TransactionCount 0}}
   <section class="cards" aria-label="Today's totals">
     <div class="card">

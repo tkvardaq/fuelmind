@@ -608,3 +608,57 @@ footer {
 }
 .answer .q { color: var(--color-muted); font-size: 0.9rem; margin: 0 0 0.35rem; }
 .answer p { margin: 0; }
+
+/* Messages page ---------------------------------------------------- */
+.stack { display: flex; flex-direction: column; gap: 0.5rem; max-width: 34rem; }
+.stack label { font-size: 0.9rem; color: var(--color-muted); }
+.stack input[type="text"], .stack select {
+  font: inherit;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--color-border, #d5d9e0);
+  border-radius: var(--radius-sm);
+  min-height: 44px;
+}
+.stack .check {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  color: var(--color-fg);
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+.stack .check input { margin-top: 0.2rem; min-width: 1rem; min-height: 1rem; }
+.stack .row { margin-top: 0.35rem; }
+.stack button {
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  padding: 0.65rem 1.1rem;
+  font: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-height: 44px;
+}
+.btn-quiet {
+  background: #fff;
+  color: var(--color-fg);
+  border: 1px solid var(--color-border, #d5d9e0);
+  padding: 0.6rem 1rem;
+  font: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-height: 44px;
+}
+.btn-quiet:hover, .btn-quiet:focus-visible { background: #f3f4f6; }
+form.inline { display: inline; }
+pre.msg {
+  font-family: inherit;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-width: 28rem;
+}
+.badge.ok    { background: #dcfce7; color: #14532d; }
+.badge.warn  { background: #fef3c7; color: #78350f; }
+.badge.alert { background: #fde2e1; color: #8b1a13; }

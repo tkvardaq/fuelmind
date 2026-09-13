@@ -818,6 +818,7 @@ func (s *Storage) UnresolvedProducts(ctx context.Context) ([]UnresolvedProduct, 
 		SELECT COALESCE(u.product_alias, ''), COUNT(*)
 		FROM raw_unresolved u
 		JOIN raw_normalize_errors e ON e.raw_transaction_id = u.id
+		WHERE e.error LIKE 'unknown product%'
 		GROUP BY 1 ORDER BY 2 DESC LIMIT 20`)
 	if err != nil {
 		return nil, err
@@ -832,4 +833,22 @@ func (s *Storage) UnresolvedProducts(ctx context.Context) ([]UnresolvedProduct, 
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// UnreadableRows counts the raw rows that failed to normalize for a
+// reason other than an unknown product — a quantity that is not a
+// number, a missing price — and returns the most common reason.
+//
+// These used to be reported as unrecognised product names, which sent
+// the owner looking for a fuel that was never the problem.
+func (s *Storage) UnreadableRows(ctx context.Context) (count int, reason string, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(MAX(e.error), '')
+		FROM raw_unresolved u
+		JOIN raw_normalize_errors e ON e.raw_transaction_id = u.id
+		WHERE e.error NOT LIKE 'unknown product%'`)
+	if err := row.Scan(&count, &reason); err != nil {
+		return 0, "", fmt.Errorf("storage: unreadable rows: %w", err)
+	}
+	return count, reason, nil
 }

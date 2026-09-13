@@ -15,7 +15,6 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/fuelmind/fuelmind/internal/ask"
 	"github.com/fuelmind/fuelmind/internal/auth"
+	"github.com/fuelmind/fuelmind/internal/format"
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
 
@@ -50,6 +50,12 @@ type Server struct {
 	// CloudConfigured tells the Settings page whether remote questions
 	// can work at all.
 	CloudConfigured bool
+	// Messages composes and sends the station's own messages. Nil means
+	// this build cannot send anything.
+	Messages Messenger
+	// Pairing links the owner's phone to the station. Nil when no
+	// pairing-based channel is configured.
+	Pairing Pairer
 }
 
 // New builds a server. Templates are parsed at startup so any template
@@ -135,6 +141,8 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/margin", s.requireAuth(http.HandlerFunc(s.handleMargin)))
 	mux.Handle("/customer", s.requireAuth(http.HandlerFunc(s.handleCustomer)))
 	mux.Handle("/settings", s.requireAuth(http.HandlerFunc(s.handleSettings)))
+	mux.Handle("/messages", s.requireAuth(http.HandlerFunc(s.handleMessages)))
+	mux.Handle("/messages/qr.png", s.requireAuth(http.HandlerFunc(s.handlePairingQR)))
 	mux.Handle("/logout", s.requireAuth(http.HandlerFunc(s.handleLogout)))
 
 	return s.securityHeaders(s.requestLogger(mux))
@@ -229,57 +237,32 @@ func funcMap() template.FuncMap {
 		"formatLiters":  formatLiters,
 		"formatDate":    formatDate,
 		"severityClass": severityClass,
+		"messageKind":   messageKindLabel,
+		"statusClass":   messageStatusClass,
 	}
 }
 
-func formatMoney(n float64) string {
-	// PKR for now; v1.1 will read the station's currency from config.
-	return "PKR " + formatNum(n, 0)
-}
+func formatMoney(n float64) string { return format.Money(n) }
 
-func formatLiters(n float64) string { return formatNum(n, 2) + " L" }
+func formatLiters(n float64) string { return format.Liters(n) }
 
-// formatPrice keeps the paisa: a per-litre price of 232.50 must not be
-// shown as 233.
-func formatPrice(n float64) string { return "PKR " + formatNum(n, 2) }
+func formatPrice(n float64) string { return format.Price(n) }
 
-func formatNum(n float64, decimals int) string {
-	pow := math.Pow10(decimals)
-	rounded := math.Round(math.Abs(n) * pow)
-	if rounded == 0 {
-		n = 0 // avoid "-0.00"
-	}
-	whole := int64(rounded / pow)
-	frac := int64(rounded) - whole*int64(pow)
-	wstr := strconv.FormatInt(whole, 10)
-	var b strings.Builder
-	if n < 0 {
-		b.WriteByte('-')
-	}
-	for i, c := range wstr {
-		if i > 0 && (len(wstr)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(c)
-	}
-	if decimals > 0 {
-		b.WriteByte('.')
-		fstr := strconv.FormatInt(frac, 10)
-		for len(fstr) < decimals {
-			fstr = "0" + fstr
-		}
-		b.WriteString(fstr)
-	}
-	return b.String()
-}
+func formatNum(n float64, decimals int) string { return format.Num(n, decimals) }
 
 // formatDate renders "2026-09-07" as "Mon 7 Sep 2026".
-func formatDate(t string) string {
-	d, err := time.Parse("2006-01-02", t)
-	if err != nil {
-		return t
+func formatDate(t string) string { return format.Date(t) }
+
+// messageStatusClass colours an outbox row by what happened to it.
+func messageStatusClass(s any) string {
+	switch fmt.Sprint(s) {
+	case "sent":
+		return "ok"
+	case "failed":
+		return "alert"
+	default:
+		return "warn"
 	}
-	return d.Format("Mon 2 Jan 2006")
 }
 
 func severityClass(s any) string {

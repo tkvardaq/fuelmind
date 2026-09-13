@@ -47,6 +47,19 @@ The file moves to `pos_drop\processed\` within a second and the numbers
 appear on the dashboard. (The samples are dated 2026-09-07, so they show
 up under Sales rather than Today.)
 
+For a dashboard with something in it, generate a week of sales ending
+today — three products, the usual cash/card/credit mix, two rush hours,
+and one credit customer who stopped paying:
+
+```powershell
+go run ./tools/gendata -out $env:USERPROFILE\.fuelmind\pos_drop -days 7
+```
+
+Add `-bad` for a file of deliberately broken rows, to watch them land in
+`pos_drop\failed\` with a reason. The generator is seeded, so the same
+flags always produce the same figures and you can check a number on the
+dashboard against the CSV that produced it.
+
 ## Configuration
 
 Everything has a working default; these override it.
@@ -120,12 +133,44 @@ logged on the station and shown at the bottom of Settings.
 End to end on one machine:
 
 ```powershell
-.distuelmind-devcloud.exe -db ":FUELMIND_DATA_DIRuelmind.db" `
+.\dist\fuelmind-devcloud.exe -db "$env:FUELMIND_DATA_DIR\fuelmind.db" `
   -admin-token admintok -webhook-token hooktok
-.distuelmind-setup.exe remote-ask on
+.\dist\fuelmind-setup.exe remote-ask on
 curl.exe -X POST "http://127.0.0.1:8080/v1/whatsapp/webhook?station_id=FM-XXXXXXX&token=hooktok" `
   --data-urlencode "From=whatsapp:+923001234567" --data-urlencode "Body=how much did we sell today?"
 ```
+
+## Messages the station sends you
+
+The station can also start the conversation. Turn it on in **Messages**,
+enter the number, and it sends:
+
+- an **evening summary** at the hour you pick — revenue, litres, sales
+  count, yesterday for comparison, credit outstanding and the score;
+- **alerts**, at most one of each a day: the score dropped below 70, a
+  credit balance has not moved in 30 days, or the POS has not exported
+  anything for six hours. The last one matters most — every other figure
+  goes quietly stale when the export stops.
+
+It is off until you switch it on, it only ever writes to the one number
+you entered, and every message it sends is listed on the same page with
+its delivery status.
+
+Delivery uses [whatsmeow](https://github.com/tulir/whatsmeow), the
+open-source Go implementation of the WhatsApp Web protocol. Press **Link
+my phone** and scan the QR code with WhatsApp -> Settings -> Linked
+devices, the same way WhatsApp Web is linked. That avoids Meta business
+verification, a BSP account and per-message billing, which is what kept
+this feature out of v1. The trade-off is that whatsmeow is an unofficial
+client: WhatsApp does not support it, and an account that sends
+unsolicited volume can be banned. FuelMind messages one number about that
+owner's own station, which is ordinary personal use.
+
+Figures in a message come from the same pre-computed mart context the
+dashboard and the Ask box use, so a message can never disagree with the
+page. When the phone is not linked, or the connection is down, messages
+wait in the outbox and go out when it recovers — nothing is lost and
+nothing is invented.
 
 ## What the owner enters by hand
 

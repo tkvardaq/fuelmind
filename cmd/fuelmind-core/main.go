@@ -32,6 +32,8 @@ import (
 	"github.com/fuelmind/fuelmind/internal/llm"
 	"github.com/fuelmind/fuelmind/internal/logging"
 	"github.com/fuelmind/fuelmind/internal/mart"
+	"github.com/fuelmind/fuelmind/internal/messaging"
+	"github.com/fuelmind/fuelmind/internal/messaging/whatsapp"
 	"github.com/fuelmind/fuelmind/internal/normalizer"
 	"github.com/fuelmind/fuelmind/internal/posadapter"
 	"github.com/fuelmind/fuelmind/internal/posadapter/csvwatch"
@@ -234,6 +236,14 @@ func run(rebuildMartOnly bool) (int, error) {
 		logger.Info("cloud disabled (FUELMIND_CLOUD_URL unset; local-only mode)")
 	}
 
+	// Messaging: the station's own voice. The WhatsApp channel is opened
+	// whether or not the owner has switched messages on, because pairing
+	// is done from the dashboard and needs a live client to talk to. A
+	// channel that fails to open is not fatal — messages are composed and
+	// queued anyway, and go out when it recovers.
+	msgAgent, pairer, closeMessaging := startMessaging(ctx, cfg.DataDir, store, answerer, identity, logger)
+	defer closeMessaging()
+
 	a := auth.New(store)
 	srv, err := web.New(store, a, logger, cfg.Port)
 	if err != nil {
@@ -244,6 +254,12 @@ func run(rebuildMartOnly bool) (int, error) {
 	srv.Mart = m
 	srv.CloudConfigured = cfg.SyncEnabled
 	srv.Answerer = answerer
+	if msgAgent != nil {
+		srv.Messages = msgAgent
+	}
+	if pairer != nil {
+		srv.Pairing = pairer
+	}
 
 	// Start the watcher before the dashboard blocks, so exports dropped
 	// while the service was down are picked up immediately.
@@ -336,4 +352,51 @@ func takeOverRollbackRecord(ctx context.Context, store *storage.Storage, dataDir
 	if err := launcher.DeleteRollbackRecord(dataDir); err != nil {
 		logger.Warn("delete rollback record", "err", err)
 	}
+}
+
+// startMessaging opens the WhatsApp channel and starts the agent that
+// composes the evening summary and the alerts.
+//
+// Failures here are deliberately soft. A station with no internet, or one
+// whose pairing has expired, must still ingest, still show the dashboard
+// and still queue the messages it wanted to send — the owner finds them
+// waiting on the Messages page instead of losing them.
+func startMessaging(ctx context.Context, dataDir string, store *storage.Storage,
+	answerer *ask.Service, identity ident.Identity, logger *slog.Logger) (*messaging.Agent, web.Pairer, func()) {
+
+	closers := []func(){}
+	closeAll := func() {
+		for _, c := range closers {
+			c()
+		}
+	}
+
+	var sender messaging.Sender
+	var pairer web.Pairer
+	wa, err := whatsapp.Open(ctx, dataDir, logger)
+	if err != nil {
+		logger.Warn("whatsapp channel unavailable; messages will be composed but not sent", "err", err)
+	} else {
+		sender, pairer = wa, wa
+		closers = append(closers, func() {
+			if err := wa.Close(); err != nil {
+				logger.Warn("closing whatsapp channel", "err", err)
+			}
+		})
+		logger.Info("whatsapp channel ready", slog.Bool("paired", wa.Paired()))
+	}
+
+	agent := messaging.New(messaging.Config{
+		Store: store, Context: answerer, Sender: sender,
+		Logger: logger, StationID: identity.StationID.String(),
+	})
+	go agent.Run(ctx)
+
+	settings := messaging.LoadSettings(ctx, store)
+	if settings.Enabled {
+		logger.Info("messaging on", slog.Int("summary_hour", settings.SummaryHour), slog.Bool("alerts", settings.Alerts))
+	} else {
+		logger.Info("messaging off (turn it on in Messages to get an evening summary)")
+	}
+	return agent, pairer, closeAll
 }

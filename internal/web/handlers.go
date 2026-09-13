@@ -168,17 +168,23 @@ func (s *Server) dashboardData(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	unreadable, unreadableWhy, err := s.store.UnreadableRows(ctx)
+	if err != nil {
+		return nil, err
+	}
 	unresolved, err := s.store.UnresolvedProducts(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"LoggedIn":     true,
-		"Totals":       totals,
-		"Score":        score,
-		"ScoreIsToday": score.Date == totals.Date,
-		"Issues":       parseIssues(score.IssuesJSON),
-		"Unresolved":   unresolved,
+		"LoggedIn":      true,
+		"Totals":        totals,
+		"Score":         score,
+		"ScoreIsToday":  score.Date == totals.Date,
+		"Issues":        parseIssues(score.IssuesJSON),
+		"Unresolved":    unresolved,
+		"Unreadable":    unreadable,
+		"UnreadableWhy": unreadableWhy,
 	}, nil
 }
 

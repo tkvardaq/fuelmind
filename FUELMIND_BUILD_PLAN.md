@@ -69,6 +69,41 @@
 > **Tests:** 133 across 15 packages, including the launcher's
 > update/rollback paths driven by a fake core binary, and an end-to-end
 > test that drives a day of exports through the real components.
+>
+> **Update (13 Sep 2026).** Four of the items above moved out of "not
+> built":
+>
+> - **Real margin.** The owner enters what they pay per litre in
+>   Settings; a price applies from its date forward and past days are
+>   recalculated, so the Margin page shows revenue, fuel cost, margin and
+>   margin % instead of calling revenue profit.
+> - **Credit that can go down.** Payments are recorded per customer, and
+>   the overdue counter follows the oldest sale that is still unpaid.
+> - **Questions from the owner's phone.** The station polls the control
+>   plane for questions addressed to it, answers them from its own mart,
+>   and posts the answer back — no inbound port, off until the owner
+>   turns it on, and every answered question is logged locally.
+> - **Messages the station sends (`internal/messaging`).** An evening
+>   summary at an hour the owner picks, plus at most one of each alert a
+>   day: score below 70, a credit balance untouched for 30 days, or no
+>   POS export for six hours. Delivery is whatsmeow (the open-source
+>   WhatsApp Web client) — the owner scans a QR once, so none of the BSP
+>   setup, Meta approval or per-message billing that deferred the
+>   WhatsApp bridge in the first place applies. Every message is composed
+>   from the same pre-computed mart context the dashboard and the Ask box
+>   use, queued in a `messages` table with a per-day dedup key, and
+>   listed on the Messages page with its delivery status; a channel that
+>   is not ready leaves messages queued rather than losing them.
+>
+> Two accuracy fixes came out of testing this on live data: the dashboard
+> used to blame every unreadable POS row on an unrecognised product name
+> (a row rejected for a non-numeric quantity was reported as an unknown
+> fuel), and `tools/gendata` — a new seeded generator for a week of
+> realistic exports — is what made that visible.
+>
+> **Still deliberately not built:** inventory and cash feeds (scored as
+> unmeasured), expense entry, cloud backup, and the production cloud
+> service.
 
 ---
 

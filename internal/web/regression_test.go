@@ -127,3 +127,35 @@ func TestFormatNum(t *testing.T) {
 		}
 	}
 }
+
+func TestUnreadableRowsAreNotBlamedOnTheProductName(t *testing.T) {
+	srv, do := loggedInServer(t)
+	db := srv.store.DB()
+	// raw_unresolved is a view over raw rows that never became
+	// transactions, so the fixture is two raw rows that failed for
+	// different reasons.
+	if _, err := db.Exec(`INSERT INTO raw_pos_transactions
+		(id, ingestion_batch_id, pos_source_id, raw_payload, payload_hash) VALUES
+		(1, 'b1', 'lane_1', '{"occurred_at":"2026-09-13T09:00:00","product_alias":"HSD"}', 'h1'),
+		(2, 'b1', 'lane_1', '{"occurred_at":"2026-09-13T09:05:00","product_alias":"WHO-KNOWS-FUEL"}', 'h2')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO raw_normalize_errors (raw_transaction_id, error) VALUES
+		(1, 'quantity_liters: invalid decimal "not-a-number"'),
+		(2, 'unknown product "WHO-KNOWS-FUEL" (add it to product_aliases)')`); err != nil {
+		t.Fatal(err)
+	}
+
+	body := do("GET", "/", nil).Body.String()
+	if !strings.Contains(body, "WHO-KNOWS-FUEL") {
+		t.Error("the genuinely unknown product is not reported")
+	}
+	if i := strings.Index(body, "recognise the product name"); i >= 0 {
+		if j := strings.Index(body[i:], "</div>"); j > 0 && strings.Contains(body[i:i+j], "HSD") {
+			t.Error("a row that failed on its quantity was reported as an unrecognised product name")
+		}
+	}
+	if !strings.Contains(body, "could not be read") || !strings.Contains(body, "invalid decimal") {
+		t.Errorf("the unreadable row is not reported with its real reason:\n%s", body)
+	}
+}

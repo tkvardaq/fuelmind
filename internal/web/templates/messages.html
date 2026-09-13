@@ -1,0 +1,125 @@
+{{define "body"}}
+<div class="page">
+  <h1>Messages</h1>
+  <p class="muted">FuelMind can send you a short summary each evening and speak up when something needs you. It only ever writes to the one number you enter here, and everything it sends is listed below.</p>
+
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  <section>
+    <h2>Your phone</h2>
+    {{if .Configured}}
+      {{if .Paired}}
+      <p class="muted">
+        Linked to WhatsApp on <strong>{{.PairedNumber}}</strong> &middot;
+        {{if .Connected}}connected{{else}}reconnecting&hellip;{{end}}
+      </p>
+      <form method="post" action="/messages" class="ask">
+        <input type="hidden" name="action" value="unpair">
+        <button type="submit" class="btn-quiet">Unlink this phone</button>
+      </form>
+      {{else if .PairingCode}}
+      <p class="muted">On your phone open WhatsApp &rarr; Settings &rarr; Linked devices &rarr; Link a device, then scan this:</p>
+      <p><img src="/messages/qr.png" alt="WhatsApp pairing code" width="320" height="320"></p>
+      <p class="muted small">The code changes every few seconds. Reload this page if it stops working.</p>
+      {{else}}
+      <p class="muted">No phone is linked yet, so nothing can be sent.</p>
+      <form method="post" action="/messages" class="ask">
+        <input type="hidden" name="action" value="pair">
+        <button type="submit">Link my phone</button>
+      </form>
+      {{end}}
+    {{else}}
+    <p class="muted">This build has no messaging channel, so messages can be composed but not sent.</p>
+    {{end}}
+  </section>
+
+  <section>
+    <h2>What to send</h2>
+    <form method="post" action="/messages" class="stack">
+      <input type="hidden" name="action" value="save">
+      <label class="check">
+        <input type="checkbox" name="enabled" {{if .Settings.Enabled}}checked{{end}}>
+        Send me messages from this station
+      </label>
+      <label for="recipient">Send to</label>
+      <input type="text" id="recipient" name="recipient" inputmode="tel"
+             value="{{.Settings.Recipient}}" placeholder="923001234567">
+      <label for="summary_hour">Evening summary at</label>
+      <select id="summary_hour" name="summary_hour">
+        {{$h := .Settings.SummaryHour}}
+        {{range .Hours}}<option value="{{.Value}}" {{if eq .Value $h}}selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+      <label class="check">
+        <input type="checkbox" name="alerts" {{if .Settings.Alerts}}checked{{end}}>
+        Also alert me when the score drops, credit stops moving, or the POS stops exporting
+      </label>
+      <div class="row">
+        <button type="submit">Save</button>
+      </div>
+    </form>
+    <form method="post" action="/messages" class="ask">
+      <input type="hidden" name="action" value="test">
+      <button type="submit" class="btn-quiet">Send a test message</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Sent from this station</h2>
+    <p class="muted">{{.Delivered}} delivered &middot; {{.Queued}} waiting &middot; {{.Failed}} failed</p>
+    {{if .Queued}}
+    <form method="post" action="/messages" class="ask">
+      <input type="hidden" name="action" value="send_now">
+      <button type="submit" class="btn-quiet">Try the waiting ones now</button>
+    </form>
+    {{end}}
+    {{if .Outbox}}
+    <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>When</th><th>Kind</th><th>To</th><th>Message</th><th>Status</th></tr></thead>
+      <tbody>
+        {{range .Outbox}}
+        <tr>
+          <td>{{.CreatedAt.Local.Format "2 Jan 15:04"}}</td>
+          <td>{{messageKind .Kind}}</td>
+          <td>{{.Recipient}}</td>
+          <td><pre class="msg">{{.Body}}</pre></td>
+          <td><span class="badge {{statusClass .Status}}">{{.Status}}</span>
+            {{if .LastError}}<div class="muted small">{{.LastError}}</div>{{end}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+    {{else}}
+    <div class="empty-state">
+      <p class="muted">Nothing sent yet.</p>
+      <p class="muted small">The first evening summary goes out at {{.Settings.SummaryHour}}:00 once you switch messages on.</p>
+    </div>
+    {{end}}
+  </section>
+
+  {{if .Questions}}
+  <section>
+    <h2>Asked from outside</h2>
+    <p class="muted">Questions answered from this station over WhatsApp, text message or support.</p>
+    <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>When</th><th>From</th><th>Question</th><th>Answer</th></tr></thead>
+      <tbody>
+        {{range .Questions}}
+        <tr>
+          <td>{{.AnsweredAt.Local.Format "2 Jan 15:04"}}</td>
+          <td>{{.AskedBy}}</td>
+          <td>{{.Question}}</td>
+          <td>{{.Answer}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+  </section>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

@@ -98,7 +98,12 @@ func (a *Agent) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !Enabled(ctx, a.cfg.Store) {
+			// Read the on/off flag with a context that shutdown cannot
+			// cancel. Cancelling a one-row local read gains nothing, and
+			// a query cancelled mid-flight leaves database/sql to close
+			// its connection asynchronously — which on Windows means the
+			// database file is still open after Close returns.
+			if !Enabled(context.WithoutCancel(ctx), a.cfg.Store) {
 				continue
 			}
 			if n, err := a.Tick(ctx); err != nil {
