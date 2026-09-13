@@ -39,6 +39,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
 	dbPath := flag.String("db", "", "register the station from this fuelmind.db")
 	adminToken := flag.String("admin-token", "", "bearer token for /v1/admin (empty disables the admin API)")
+	webhookToken := flag.String("webhook-token", "", "shared secret for the WhatsApp/SMS webhook (empty disables it)")
 	artifacts := flag.String("artifacts", "", "directory served at /artifacts/ (default: the folder of the first -release)")
 	tier := flag.String("tier", "private", "licence tier for registered stations")
 	flag.Var(&stations, "station", "station to register as ID=APIKEY (repeatable)")
@@ -47,6 +48,7 @@ func main() {
 
 	srv := cloudctl.New()
 	srv.AdminToken = *adminToken
+	srv.WebhookToken = *webhookToken
 
 	if *dbPath != "" {
 		id, key, err := identityFromDB(*dbPath)
@@ -97,6 +99,9 @@ func main() {
 	if *artifacts != "" {
 		mux.Handle("/artifacts/", logRequests(http.StripPrefix("/artifacts/", http.FileServer(http.Dir(*artifacts)))))
 		log.Printf("serving artifacts from %s", *artifacts)
+	}
+	if *webhookToken != "" {
+		log.Printf("WhatsApp/SMS webhook: POST http://%s/v1/whatsapp/webhook?station_id=<ID>&token=<webhook token>", *addr)
 	}
 	log.Printf("devcloud listening on http://%s", *addr)
 	server := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}

@@ -1,0 +1,52 @@
+{{define "body"}}
+<div class="page">
+  <h1>Margin</h1>
+  <p class="muted">Revenue against what the fuel cost you, last 30 days.</p>
+
+  {{if not .HavePrices}}
+  <div class="notice" role="status">
+    No purchase prices recorded yet, so margin cannot be worked out. Add what you pay per litre in
+    <a href="/settings">Settings</a> and this page fills in, including for past days.
+  </div>
+  {{end}}
+
+  {{if .Rows}}
+  <section class="cards" aria-label="Totals">
+    <div class="card"><div class="label">Revenue</div><div class="big">{{formatMoney .TotalRev}}</div></div>
+    <div class="card"><div class="label">Fuel cost</div><div class="big">{{formatMoney .TotalCost}}</div></div>
+    <div class="card"><div class="label">Margin</div><div class="big">{{formatMoney .TotalMargin}}</div></div>
+    <div class="card"><div class="label">Margin %</div><div class="big">{{printf "%.1f%%" .TotalPct}}</div></div>
+  </section>
+  <p class="muted small">Totals cover the {{.CostedDays}} day(s) that have a purchase price. Days without one show a dash.</p>
+
+  <div class="table-wrap">
+  <table class="data">
+    <thead>
+      <tr><th>Date</th><th>Product</th><th class="num">Revenue</th><th class="num">Fuel cost</th><th class="num">Margin</th><th class="num">Margin %</th></tr>
+    </thead>
+    <tbody>
+      {{range .Rows}}
+      <tr>
+        <td>{{formatDate .Date}}</td>
+        <td>{{.DisplayName}}</td>
+        <td class="num">{{formatMoney .Revenue}}</td>
+        {{if .Costed}}
+        <td class="num">{{formatMoney .CostOfGoods}}</td>
+        <td class="num">{{formatMoney .MarginAmount}}</td>
+        <td class="num">{{printf "%.1f%%" .MarginPct}}</td>
+        {{else}}
+        <td class="num muted">—</td>
+        <td class="num muted">no price</td>
+        <td class="num muted">—</td>
+        {{end}}
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <div class="empty-state"><p class="muted">No sales in the last 30 days yet.</p></div>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

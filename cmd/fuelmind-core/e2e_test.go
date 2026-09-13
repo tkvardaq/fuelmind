@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fuelmind/fuelmind/internal/ask"
 	"github.com/fuelmind/fuelmind/internal/auth"
 	"github.com/fuelmind/fuelmind/internal/backup"
 	"github.com/fuelmind/fuelmind/internal/llm"
@@ -67,7 +68,7 @@ func TestFullSystemE2E(t *testing.T) {
 		t.Fatalf("web.New: %v", err)
 	}
 	srv.Version = "e2e-test"
-	srv.Router = llm.NewRouter(nil, llm.TierBasic)
+	srv.Answerer = ask.New(store, llm.NewRouter(nil, llm.TierBasic))
 	handler := srv.Routes()
 
 	call := func(method, path string, form url.Values, cookie *http.Cookie) *httptest.ResponseRecorder {

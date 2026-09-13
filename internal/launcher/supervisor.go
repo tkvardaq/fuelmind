@@ -45,6 +45,7 @@ type Options struct {
 	Port          int           // dashboard port used for the post-update health check (default 8765)
 	HealthTimeout time.Duration // how long a new version has to answer /healthz (default 90s)
 	Probation     time.Duration // window after an update in which a crash triggers rollback (default 2h)
+	HardenACL     bool          // restrict the data folder to the service account (set when running as a service)
 	Logger        *log.Logger
 }
 
@@ -96,9 +97,13 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		}
 	}
 	// The data folder holds the station's sales history; make sure
-	// only the service account and administrators can read it.
-	if err := HardenDataDir(s.opt.BaseDir); err != nil {
-		s.log.Printf("could not restrict permissions on %s: %v", s.opt.BaseDir, err)
+	// only the service account and administrators can read it. Only
+	// under the service: a developer running this from a console
+	// should not have their own folder locked against them.
+	if s.opt.HardenACL {
+		if err := HardenDataDir(s.opt.BaseDir); err != nil {
+			s.log.Printf("could not restrict permissions on %s: %v", s.opt.BaseDir, err)
+		}
 	}
 
 	current, err := ReadCurrentVersion(s.opt.BaseDir)

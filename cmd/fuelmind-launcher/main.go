@@ -67,6 +67,7 @@ func main() {
 		BaseDir:    baseDir,
 		InstallDir: filepath.Dir(exe),
 		Port:       port,
+		HardenACL:  isService,
 		Logger:     logger,
 	})
 	logger.Printf("starting %s (data dir %s)", version, baseDir)

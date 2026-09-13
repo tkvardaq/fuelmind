@@ -15,7 +15,7 @@ Everything works with the internet unplugged.
 |---|---|
 | `cmd/fuelmind-core/` | the local core: ingest, normalize, mart, dashboard, heartbeat, updates |
 | `cmd/fuelmind-launcher/` | the Windows service: supervises the core, applies updates, rolls back |
-| `cmd/fuelmind-setup/` | support tool: `status`, `reset-pin`, `test-heartbeat` |
+| `cmd/fuelmind-setup/` | support tool: `status`, `reset-pin`, `test-heartbeat`, `remote-ask on|off` |
 | `cmd/fuelmind-devcloud/` | the control plane as a runnable dev server |
 | `internal/posadapter/` | the POS plug-in contract, registry and the `csv_watch` adapter |
 | `internal/storage/` | SQLite (pure Go), versioned migrations, all queries |
@@ -24,6 +24,8 @@ Everything works with the internet unplugged.
 | `internal/auth/` | PIN login (PBKDF2-SHA256, sessions, lockout) |
 | `internal/sync/`, `internal/update/`, `internal/version/` | heartbeat, licence, unattended updates |
 | `internal/llm/` | the intent router (deterministic answers first, Ollama for the rest) |
+| `internal/ask/` | one answering service shared by the dashboard and the relay |
+| `internal/relay/` | answers questions sent from the owner's phone (WhatsApp / SMS) |
 | `cloud/` | control-plane Postgres schema |
 | `installer/` | WiX MSI source and `build.ps1` |
 
@@ -93,6 +95,50 @@ The service runs as `NT AUTHORITY\LocalService`. The launcher starts the
 core, restarts it with backoff, and after an update checks `/healthz` and
 rolls back to the previous version if the new one does not answer.
 
+## Asking from your phone (WhatsApp or SMS)
+
+The dashboard has an Ask box on the Today page. Away from the station,
+the owner can ask the same questions by WhatsApp or text message.
+
+Nothing listens on an inbound port. The station polls the control plane,
+answers from its own data, and posts the answer back. It is off until the
+owner turns it on in **Settings -> Ask from your phone** (or with
+`fuelmind-setup remote-ask on`), because the answer — today's revenue, for
+example — travels through the control plane.
+
+Point a WhatsApp/SMS provider (Twilio, 360dialog) at:
+
+```
+POST https://<control plane>/v1/whatsapp/webhook?station_id=FM-XXXXXXX&token=<webhook token>
+```
+
+It reads the usual `From` and `Body` form fields and replies with TwiML,
+which the provider sends straight back to the sender. Support can ask the
+same way through `POST /v1/admin/messages`. Every answered question is
+logged on the station and shown at the bottom of Settings.
+
+End to end on one machine:
+
+```powershell
+.distuelmind-devcloud.exe -db ":FUELMIND_DATA_DIRuelmind.db" `
+  -admin-token admintok -webhook-token hooktok
+.distuelmind-setup.exe remote-ask on
+curl.exe -X POST "http://127.0.0.1:8080/v1/whatsapp/webhook?station_id=FM-XXXXXXX&token=hooktok" `
+  --data-urlencode "From=whatsapp:+923001234567" --data-urlencode "Body=how much did we sell today?"
+```
+
+## What the owner enters by hand
+
+Two numbers cannot come from a POS export, so the dashboard asks for them:
+
+- **Settings -> what you pay per litre.** Margin is revenue minus what the
+  fuel cost. Without a purchase price the Margin page says so instead of
+  showing revenue as profit. A price applies from its date forward and
+  past days are recalculated.
+- **Credit -> customer -> record a payment.** Credit balances go down when
+  a customer pays, and the overdue counter follows the oldest sale that is
+  still unpaid.
+
 ## Testing the cloud path locally
 
 ```powershell
@@ -129,7 +175,18 @@ intent router, the MSI, and the security pass (PIN lockout, LAN exposure
 with loopback-only first-run setup, telemetry consent, least-privilege
 service account).
 
-Known gaps, all deliberate for v1: no inventory or cash feed (those score
-components are shown as unmeasured), no purchase prices so margin is
-revenue only, no expense entry, no WhatsApp bridge, and the production
-cloud service is not built yet — only its schema and the dev server.
+Margin, credit repayments and remote questions have since been added:
+the owner enters purchase prices and payments in the dashboard, and can
+ask by WhatsApp or SMS through the relay.
+
+Known gaps, all deliberate for v1:
+
+- No tank or shift feed, so the inventory and cash parts of the FuelMind
+  Score are shown as unmeasured and left out of the total rather than
+  scored as perfect.
+- No expense entry, so "margin" is fuel margin, not net profit.
+- One POS adapter (`csv_watch`). The plug-in contract is there for more.
+- The production control plane is not built: this repo has its Postgres
+  schema and `fuelmind-devcloud`, which is the same handler set in memory.
+- The MSI has been built and validated but not yet installed on a real
+  shop PC.

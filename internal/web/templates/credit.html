@@ -17,7 +17,7 @@
     <tbody>
       {{range .Rows}}
       <tr>
-        <td>{{.CustomerPhone}}</td>
+        <td><a href="/customer?phone={{.CustomerPhone}}">{{.CustomerPhone}}</a></td>
         <td class="num">{{formatMoney .OutstandingAmount}}</td>
         <td class="num">{{.TransactionCount}}</td>
         <td class="num">{{.DaysOverdue}}</td>

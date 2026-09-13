@@ -1,0 +1,86 @@
+{{define "body"}}
+<div class="page">
+  <h1>Settings</h1>
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  <section>
+    <h2>What you pay per litre</h2>
+    <p class="muted">FuelMind knows what you sold; it needs your purchase price to work out margin. A price applies from its date until you enter a newer one, and past days are recalculated.</p>
+    <form method="post" action="/settings" class="ask">
+      <input type="hidden" name="action" value="price">
+      <label for="product_code" class="sr-only">Product</label>
+      <select id="product_code" name="product_code">
+        {{range .Products}}<option value="{{.}}">{{.}}</option>{{end}}
+      </select>
+      <label for="cost" class="sr-only">Cost per litre</label>
+      <input type="text" id="cost" name="cost" inputmode="decimal" placeholder="Cost per litre, e.g. 250.50" required>
+      <label for="effective_date" class="sr-only">From date</label>
+      <input type="date" id="effective_date" name="effective_date" value="{{.Today}}">
+      <button type="submit">Save price</button>
+    </form>
+
+    {{if .Prices}}
+    <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>From</th><th>Product</th><th class="num">Cost per litre</th><th>Note</th></tr></thead>
+      <tbody>
+        {{range .Prices}}
+        <tr><td>{{formatDate .EffectiveDate}}</td><td>{{.ProductCode}}</td><td class="num">{{formatPrice .CostPerLiter}}</td><td>{{.Note}}</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+    {{else}}
+    <p class="muted small">No prices recorded yet, so the Margin page is empty.</p>
+    {{end}}
+  </section>
+
+  <section>
+    <h2>Ask from your phone</h2>
+    {{if .CloudOn}}
+    <p class="muted">
+      With this on, you can ask about this station by WhatsApp or text message when you are away, and the answer comes from this PC.
+      The station is never opened to the internet: it asks the FuelMind service whether you have sent a question, answers it here, and sends the answer back.
+      The answer itself (for example today's revenue) passes through that service, so leave this off if you would rather it never left the shop.
+    </p>
+    <form method="post" action="/settings" class="ask">
+      <input type="hidden" name="action" value="remote_ask">
+      <input type="hidden" name="remote_ask" value="{{if .RemoteAsk}}off{{else}}on{{end}}">
+      <button type="submit">{{if .RemoteAsk}}Turn off{{else}}Turn on{{end}}</button>
+      <span class="muted">Currently <strong>{{if .RemoteAsk}}on{{else}}off{{end}}</strong>{{if .StationID}} &middot; station {{.StationID}}{{end}}</span>
+    </form>
+    {{else}}
+    <p class="muted">This station is not connected to a FuelMind service, so questions can only be asked here on the station network. Everything else keeps working.</p>
+    {{end}}
+  </section>
+
+  <section>
+    <h2>Health data</h2>
+    <p class="muted">Sends hardware tier, database size, free disk space, error counts and the last POS file time to FuelMind support. Sales and customer data are never sent.</p>
+    <form method="post" action="/settings" class="ask">
+      <input type="hidden" name="action" value="telemetry">
+      <input type="hidden" name="telemetry" value="{{if .Telemetry}}off{{else}}on{{end}}">
+      <button type="submit">{{if .Telemetry}}Stop sending{{else}}Start sending{{end}}</button>
+      <span class="muted">Currently <strong>{{if .Telemetry}}on{{else}}off{{end}}</strong></span>
+    </form>
+  </section>
+
+  {{if .Questions}}
+  <section>
+    <h2>Questions answered from away</h2>
+    <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th>When</th><th>From</th><th>Question</th><th>Answer</th></tr></thead>
+      <tbody>
+        {{range .Questions}}
+        <tr><td>{{.AnsweredAt.Local.Format "2 Jan 15:04"}}</td><td>{{.AskedBy}}</td><td>{{.Question}}</td><td>{{.Answer}}</td></tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+  </section>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

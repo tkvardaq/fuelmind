@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fuelmind/fuelmind/internal/ask"
 	"github.com/fuelmind/fuelmind/internal/auth"
-	"github.com/fuelmind/fuelmind/internal/llm"
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
 
@@ -43,8 +43,13 @@ type Server struct {
 	Bind string
 	// Version is shown in the footer.
 	Version string
-	// Router answers questions typed into the "Ask" box. Nil disables it.
-	Router *llm.Router
+	// Answerer replies to questions from the Ask box. Nil disables it.
+	Answerer *ask.Service
+	// Mart recomputes figures right after the owner enters data.
+	Mart Materializer
+	// CloudConfigured tells the Settings page whether remote questions
+	// can work at all.
+	CloudConfigured bool
 }
 
 // New builds a server. Templates are parsed at startup so any template
@@ -127,6 +132,9 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/credit", s.requireAuth(http.HandlerFunc(s.handleCredit)))
 	mux.Handle("/score", s.requireAuth(http.HandlerFunc(s.handleScore)))
 	mux.Handle("/ask", s.requireAuth(http.HandlerFunc(s.handleAsk)))
+	mux.Handle("/margin", s.requireAuth(http.HandlerFunc(s.handleMargin)))
+	mux.Handle("/customer", s.requireAuth(http.HandlerFunc(s.handleCustomer)))
+	mux.Handle("/settings", s.requireAuth(http.HandlerFunc(s.handleSettings)))
 	mux.Handle("/logout", s.requireAuth(http.HandlerFunc(s.handleLogout)))
 
 	return s.securityHeaders(s.requestLogger(mux))
@@ -217,6 +225,7 @@ func isLoopback(r *http.Request) bool {
 func funcMap() template.FuncMap {
 	return template.FuncMap{
 		"formatMoney":   formatMoney,
+		"formatPrice":   formatPrice,
 		"formatLiters":  formatLiters,
 		"formatDate":    formatDate,
 		"severityClass": severityClass,
@@ -229,6 +238,10 @@ func formatMoney(n float64) string {
 }
 
 func formatLiters(n float64) string { return formatNum(n, 2) + " L" }
+
+// formatPrice keeps the paisa: a per-litre price of 232.50 must not be
+// shown as 233.
+func formatPrice(n float64) string { return "PKR " + formatNum(n, 2) }
 
 func formatNum(n float64, decimals int) string {
 	pow := math.Pow10(decimals)
@@ -306,4 +319,10 @@ func (s *Server) renderStatus(w http.ResponseWriter, status int, name string, da
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = buf.WriteTo(w)
+}
+
+// Materializer recomputes the data mart. The web layer only needs this
+// one method, so tests can pass a stub.
+type Materializer interface {
+	MaterializeSince(ctx context.Context, since time.Time) error
 }

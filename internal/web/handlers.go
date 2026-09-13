@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/fuelmind/fuelmind/internal/auth"
-	"github.com/fuelmind/fuelmind/internal/llm"
 )
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, sid string) {
@@ -213,16 +212,11 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, "ask", err)
 		return
 	}
-	answer := "The Ask box is not available on this station."
-	if s.Router != nil {
-		mctx, err := s.martContext(r.Context())
-		if err != nil {
-			s.renderError(w, "ask: context", err)
-			return
-		}
-		ans, path, rerr := s.Router.Route(r.Context(), q, mctx)
-		if rerr != nil {
-			s.logger.Warn("ask: llm", "err", rerr)
+	answer := "Answering questions is not available on this station."
+	if s.Answerer != nil {
+		ans, path, aerr := s.Answerer.Answer(r.Context(), q)
+		if aerr != nil {
+			s.logger.Warn("ask", "err", aerr)
 		}
 		s.logger.Info("ask", "path", path)
 		answer = ans
@@ -230,57 +224,6 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	data["Question"] = q
 	data["Answer"] = answer
 	s.render(w, "dashboard", data)
-}
-
-// martContext builds the pre-computed numbers the intent router may use.
-func (s *Server) martContext(ctx context.Context) (llm.MartContext, error) {
-	now := time.Now()
-	today, err := s.store.TodayTotals(ctx)
-	if err != nil {
-		return llm.MartContext{}, err
-	}
-	yesterday, err := s.store.DayTotals(ctx, now.AddDate(0, 0, -1).Format("2006-01-02"))
-	if err != nil {
-		return llm.MartContext{}, err
-	}
-	week, err := s.store.RecentDailySales(ctx, 7)
-	if err != nil {
-		return llm.MartContext{}, err
-	}
-	credit, err := s.store.RecentCredit(ctx, 10000)
-	if err != nil {
-		return llm.MartContext{}, err
-	}
-	score, err := s.store.LatestScore(ctx)
-	if err != nil {
-		return llm.MartContext{}, err
-	}
-	m := llm.MartContext{
-		Date:              today.Date,
-		RevenueToday:      today.Revenue,
-		RevenueYesterday:  yesterday.Revenue,
-		VolumeTodayLiters: today.VolumeLiters,
-		TransactionsToday: today.TransactionCount,
-		OverallScore:      score.Overall,
-		ScoreDate:         score.Date,
-	}
-	for _, row := range week {
-		m.Volume7d += row.VolumeLiters
-		m.Revenue7d += row.Revenue
-		if row.Date == today.Date {
-			m.TopProducts = append(m.TopProducts, llm.ProductRow{Code: row.ProductCode, Volume: row.VolumeLiters, Money: row.Revenue})
-		}
-	}
-	for _, c := range credit {
-		m.CreditOutstanding += c.OutstandingAmount
-		m.CreditCustomers++
-	}
-	for _, is := range parseIssues(score.IssuesJSON) {
-		if msg, ok := is["message"].(string); ok {
-			m.OpenIssues = append(m.OpenIssues, msg)
-		}
-	}
-	return m, nil
 }
 
 func (s *Server) handleSales(w http.ResponseWriter, r *http.Request) {

@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fuelmind/fuelmind/internal/ask"
 	"github.com/fuelmind/fuelmind/internal/auth"
 	"github.com/fuelmind/fuelmind/internal/backup"
 	"github.com/fuelmind/fuelmind/internal/config"
@@ -34,6 +35,7 @@ import (
 	"github.com/fuelmind/fuelmind/internal/normalizer"
 	"github.com/fuelmind/fuelmind/internal/posadapter"
 	"github.com/fuelmind/fuelmind/internal/posadapter/csvwatch"
+	"github.com/fuelmind/fuelmind/internal/relay"
 	"github.com/fuelmind/fuelmind/internal/storage"
 	"github.com/fuelmind/fuelmind/internal/sync"
 	"github.com/fuelmind/fuelmind/internal/update"
@@ -164,6 +166,10 @@ func run(rebuildMartOnly bool) (int, error) {
 	defer watcher.Close()
 	go periodicRefresh(ctx, watcher, norm, m, posDrop, logger)
 
+	// One answering service for every channel: the dashboard Ask box and
+	// the cloud relay both use it, so they cannot drift apart.
+	answerer := ask.New(store, llm.NewRouter(llm.NewHTTPClient(cfg.OllamaURL), llm.Tier(hwTier)))
+
 	identity, err := loadOrCreateIdentity(ctx, store, logger)
 	if err != nil {
 		return 1, fmt.Errorf("identity: %w", err)
@@ -210,6 +216,20 @@ func run(rebuildMartOnly bool) (int, error) {
 		})
 		go updater.Run(ctx)
 		logger.Info("update agent started")
+
+		relayAgent := relay.New(relay.Config{
+			Store:    store,
+			Answerer: answerer,
+			Identity: identity,
+			CloudURL: cfg.CloudURL,
+			Logger:   logger,
+		})
+		go relayAgent.Run(ctx)
+		if relay.Enabled(ctx, store) {
+			logger.Info("remote questions enabled (WhatsApp/SMS/support can ask this station)")
+		} else {
+			logger.Info("remote questions off (turn on in Settings to ask from your phone)")
+		}
 	} else {
 		logger.Info("cloud disabled (FUELMIND_CLOUD_URL unset; local-only mode)")
 	}
@@ -221,7 +241,9 @@ func run(rebuildMartOnly bool) (int, error) {
 	}
 	srv.Bind = cfg.Bind
 	srv.Version = version
-	srv.Router = llm.NewRouter(llm.NewHTTPClient(cfg.OllamaURL), llm.Tier(hwTier))
+	srv.Mart = m
+	srv.CloudConfigured = cfg.SyncEnabled
+	srv.Answerer = answerer
 
 	// Start the watcher before the dashboard blocks, so exports dropped
 	// while the service was down are picked up immediately.

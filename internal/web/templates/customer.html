@@ -1,0 +1,60 @@
+{{define "body"}}
+<div class="page">
+  <h1>{{.Phone}}</h1>
+  <p class="muted">Credit customer &middot; <a href="/credit">back to all customers</a></p>
+
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  <section class="cards" aria-label="Balance">
+    <div class="card"><div class="label">Outstanding</div><div class="big">{{formatMoney .Balance}}</div></div>
+    <div class="card"><div class="label">Days since oldest unpaid sale</div><div class="big">{{.Overdue}}</div></div>
+  </section>
+
+  <section class="ask">
+    <h2>Record a payment</h2>
+    <form method="post" action="/customer?phone={{.Phone}}">
+      <label for="amount" class="sr-only">Amount</label>
+      <input type="text" id="amount" name="amount" inputmode="decimal" placeholder="Amount, e.g. 5000" required>
+      <label for="paid_on" class="sr-only">Date</label>
+      <input type="date" id="paid_on" name="paid_on" value="{{.Today}}">
+      <label for="method" class="sr-only">Method</label>
+      <select id="method" name="method">
+        <option value="CASH">Cash</option>
+        <option value="BANK">Bank transfer</option>
+        <option value="MOBILE_WALLET">Mobile wallet</option>
+      </select>
+      <button type="submit">Record payment</button>
+    </form>
+  </section>
+
+  <h2>Payments</h2>
+  {{if .Payments}}
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr><th>Date</th><th class="num">Amount</th><th>Method</th><th>Note</th></tr></thead>
+    <tbody>
+      {{range .Payments}}
+      <tr><td>{{formatDate .PaidOn}}</td><td class="num">{{formatPrice .Amount}}</td><td>{{.Method}}</td><td>{{.Note}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}<p class="muted small">No payments recorded yet.</p>{{end}}
+
+  <h2>Credit sales</h2>
+  {{if .Sales}}
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr><th>When</th><th>Product</th><th class="num">Litres</th><th class="num">Amount</th></tr></thead>
+    <tbody>
+      {{range .Sales}}
+      <tr><td>{{.When}}</td><td>{{.Product}}</td><td class="num">{{formatLiters .Liters}}</td><td class="num">{{formatPrice .Amount}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}<p class="muted small">No credit sales for this number.</p>{{end}}
+</div>
+{{end}}
+{{template "base" .}}

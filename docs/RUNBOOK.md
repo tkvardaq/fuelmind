@@ -117,3 +117,35 @@ verifies the artifact, stages it, and asks the launcher to switch during
   software version and a timestamp. Health data (hardware tier, database
   size, free disk, error counts, score, last POS file time) is only sent
   if the owner ticked the box at setup.
+
+## Owner asks questions from their phone
+
+"I turned it on but nothing answers."
+
+1. `fuelmind-setup status` — is `remote questions: on`, and is a cloud URL configured?
+2. Is the service running? `sc query FuelMindService`.
+3. `logs\core.log` should show `remote questions enabled` at start-up and
+   `remote question answered` per message.
+4. On the control plane, check the webhook token in the provider's URL and
+   that the station id in the query string matches the station.
+5. The sender gets "your station is offline" when the station has not
+   answered within ~25s: the station is down, has no internet, or the
+   owner switched remote questions off.
+
+Answers are logged on the station at the bottom of **Settings**, and in
+`remote_questions` in the database.
+
+## "The margin numbers look wrong"
+
+Margin needs the purchase price the owner paid. Check **Settings -> what
+you pay per litre**: a price applies from its date forward, so a price
+entered today does not change last week unless a price is entered with
+last week's date. Days with no price show a dash, never revenue-as-profit.
+
+## "A customer paid but still shows as owing"
+
+Payments are recorded per customer: **Credit -> the customer -> record a
+payment**. The balance and the overdue counter update immediately (the
+mart is recalculated for the last 90 days on save). If the customer's
+phone number differs by formatting between the POS export and the payment,
+they will be two different customers — fix the POS export.

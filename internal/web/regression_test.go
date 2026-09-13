@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/fuelmind/fuelmind/internal/ask"
 	"github.com/fuelmind/fuelmind/internal/llm"
 )
 
@@ -103,7 +104,7 @@ func TestStaleScoreIsLabelled(t *testing.T) {
 
 func TestAskUsesRouter(t *testing.T) {
 	srv, do := loggedInServer(t)
-	srv.Router = llm.NewRouter(nil, llm.TierBasic)
+	srv.Answerer = ask.New(srv.store, llm.NewRouter(nil, llm.TierBasic))
 	w := do("POST", "/ask", url.Values{"q": {"how much did we sell today?"}})
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "Today&#39;s revenue is PKR 0.00") {
 		t.Errorf("ask: status=%d body=%s", w.Code, w.Body.String())

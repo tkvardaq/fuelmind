@@ -24,6 +24,7 @@ import (
 	"github.com/fuelmind/fuelmind/internal/config"
 	"github.com/fuelmind/fuelmind/internal/hardware"
 	"github.com/fuelmind/fuelmind/internal/ident"
+	"github.com/fuelmind/fuelmind/internal/relay"
 	"github.com/fuelmind/fuelmind/internal/storage"
 	"github.com/fuelmind/fuelmind/internal/sync"
 )
@@ -36,11 +37,11 @@ func main() {
 }
 
 func usage() error {
-	return errors.New("usage: fuelmind-setup status | reset-pin | test-heartbeat")
+	return errors.New("usage: fuelmind-setup status | reset-pin | test-heartbeat | remote-ask on|off")
 }
 
 func run(args []string) error {
-	if len(args) != 1 {
+	if len(args) == 0 || len(args) > 2 {
 		return usage()
 	}
 	cfg, err := config.Load()
@@ -64,6 +65,8 @@ func run(args []string) error {
 		return resetPIN(ctx, store)
 	case "test-heartbeat":
 		return testHeartbeat(ctx, store, cfg)
+	case "remote-ask":
+		return remoteAsk(ctx, store, args)
 	default:
 		return usage()
 	}
@@ -83,6 +86,11 @@ func status(ctx context.Context, store *storage.Storage, cfg *config.Config) err
 		fmt.Println("  cloud:         not configured (local-only)")
 	}
 	fmt.Println("  telemetry:    ", store.LocalConfigValue(ctx, sync.ConfigKeyTelemetryConsent, "false"))
+	remote := "off"
+	if relay.Enabled(ctx, store) {
+		remote = "on"
+	}
+	fmt.Println("  remote questions:", remote, "(fuelmind-setup remote-ask on|off)")
 
 	// POS drop folder: exists, writable, and what is waiting in it.
 	drop := filepath.Join(cfg.DataDir, "pos_drop")
@@ -195,5 +203,29 @@ func testHeartbeat(ctx context.Context, store *storage.Storage, cfg *config.Conf
 		return fmt.Errorf("heartbeat failed: %w", err)
 	}
 	fmt.Println("Heartbeat accepted. Licence tier:", sync.LicenseTier(ctx, store))
+	return nil
+}
+
+// remoteAsk turns answering questions from the owner's phone on or off.
+func remoteAsk(ctx context.Context, store *storage.Storage, args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: fuelmind-setup remote-ask on|off")
+	}
+	switch args[1] {
+	case "on":
+		if err := relay.SetEnabled(ctx, store, true); err != nil {
+			return err
+		}
+		fmt.Println("Remote questions are ON.")
+		fmt.Println("The station will answer questions sent by WhatsApp, SMS or support.")
+		fmt.Println("Answers contain figures such as today's revenue and pass through the FuelMind service.")
+	case "off":
+		if err := relay.SetEnabled(ctx, store, false); err != nil {
+			return err
+		}
+		fmt.Println("Remote questions are OFF. Questions can only be asked on the station network.")
+	default:
+		return errors.New("usage: fuelmind-setup remote-ask on|off")
+	}
 	return nil
 }
