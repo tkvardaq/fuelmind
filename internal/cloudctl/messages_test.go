@@ -15,6 +15,11 @@ func msgServer(t *testing.T) (*Server, string) {
 	s.AdminToken = "admin-tok"
 	s.WebhookToken = "hook-tok"
 	s.WebhookWait = 2 * time.Second
+	// The owner's number is what proves an inbound message may see this
+	// station's figures.
+	s.mu.Lock()
+	s.stations["FM-TEST1"].OwnerNumbers = []string{"+923001234567"}
+	s.mu.Unlock()
 	return s, u
 }
 
@@ -122,7 +127,10 @@ func TestWebhookNeedsItsToken(t *testing.T) {
 func TestWebhookTellsTheSenderWhenTheStationIsOffline(t *testing.T) {
 	s, u := msgServer(t)
 	s.WebhookWait = 300 * time.Millisecond // nobody is answering
-	form := strings.NewReader(url.Values{"Body": {"score?"}}.Encode())
+	form := strings.NewReader(url.Values{
+		"From": {"whatsapp:+923001234567"},
+		"Body": {"score?"},
+	}.Encode())
 	resp, err := http.Post(u+"/v1/whatsapp/webhook?station_id=FM-TEST1&token=hook-tok",
 		"application/x-www-form-urlencoded", form)
 	if err != nil {
@@ -147,5 +155,111 @@ func do2(t *testing.T, method, url, token, body string) {
 	resp, err := http.DefaultClient.Do(req)
 	if err == nil {
 		resp.Body.Close()
+	}
+}
+
+// The shared webhook token authenticates the gateway, not the person. A
+// caller who holds it must still not be able to read a station's takings
+// by naming its id: station ids are printed on dashboards, not secret.
+func TestWebhookRefusesUnregisteredSender(t *testing.T) {
+	s, u := msgServer(t)
+	s.WebhookWait = 300 * time.Millisecond
+
+	form := url.Values{
+		"From": {"whatsapp:+923009999999"}, // not the owner's number
+		"Body": {"how much did we sell today?"},
+	}
+	resp, err := http.Post(u+"/v1/whatsapp/webhook?station_id=FM-TEST1&token=hook-tok",
+		"application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	buf := make([]byte, 1024)
+	n, _ := resp.Body.Read(buf)
+	reply := string(buf[:n])
+	if !strings.Contains(reply, "not registered") {
+		t.Errorf("reply = %q, want a refusal for an unregistered number", reply)
+	}
+
+	// Nothing was queued, so the station never even sees the question.
+	s.mu.Lock()
+	queued := len(s.order)
+	s.mu.Unlock()
+	if queued != 0 {
+		t.Errorf("queued %d messages for an unregistered sender, want 0", queued)
+	}
+}
+
+// A registered owner must not be able to read a different station by
+// putting someone else's id in the query string.
+func TestWebhookRefusesMismatchedStationID(t *testing.T) {
+	s, u := msgServer(t)
+	s.AddStation(&Station{
+		StationID: "FM-OTHER", APIKey: "other-key", Tier: "private",
+		Status: "active", ValidFrom: time.Now(),
+	})
+
+	form := url.Values{
+		"From": {"whatsapp:+923001234567"}, // owner of FM-TEST1
+		"Body": {"how much did we sell today?"},
+	}
+	resp, err := http.Post(u+"/v1/whatsapp/webhook?station_id=FM-OTHER&token=hook-tok",
+		"application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("cross-station request = %d, want 403", resp.StatusCode)
+	}
+}
+
+// The owner may register a number in any shape and message from any
+// other shape of the same number.
+func TestWebhookMatchesNumberInAnyFormat(t *testing.T) {
+	s, _ := msgServer(t)
+	s.mu.Lock()
+	s.stations["FM-TEST1"].OwnerNumbers = []string{"0300-1234567"}
+	st := s.stations["FM-TEST1"]
+	s.mu.Unlock()
+
+	for _, from := range []string{"whatsapp:+923001234567", "+92 300 1234567", "03001234567"} {
+		if !st.ownsNumber(senderNumber(from)) {
+			t.Errorf("ownsNumber(%q) = false, want true", from)
+		}
+	}
+	if st.ownsNumber("+923009999999") {
+		t.Error("ownsNumber matched a different number")
+	}
+}
+
+// An unthrottled webhook lets a caller work through the number space at
+// machine speed, so a burst from one sender is cut off.
+func TestWebhookRateLimitsOneSender(t *testing.T) {
+	s, u := msgServer(t)
+	s.WebhookWait = 50 * time.Millisecond
+
+	limited := false
+	for i := 0; i < webhookBurst+5; i++ {
+		form := url.Values{
+			"From": {"whatsapp:+923009999999"},
+			"Body": {"probe"},
+		}
+		resp, err := http.Post(u+"/v1/whatsapp/webhook?token=hook-tok",
+			"application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 512)
+		n, _ := resp.Body.Read(buf)
+		resp.Body.Close()
+		if strings.Contains(string(buf[:n]), "Too many messages") {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Errorf("sent %d messages without being rate limited", webhookBurst+5)
 	}
 }

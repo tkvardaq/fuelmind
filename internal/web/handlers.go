@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fuelmind/fuelmind/internal/auth"
+	"github.com/fuelmind/fuelmind/internal/storage"
 )
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, sid string) {
@@ -33,7 +34,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	remote := !isLoopback(r)
 	page := func(status int, errMsg string) {
-		s.renderStatus(w, status, "setup", map[string]any{
+		s.renderStatus(w, r, status, "setup", map[string]any{
 			"PINSet": pinSet, "Remote": remote, "Port": s.port, "Error": errMsg,
 		})
 	}
@@ -90,26 +91,63 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/setup", http.StatusFound)
 		return
 	}
+	// Who can sign in. With one account there is nothing to choose and
+	// the picker is hidden; with staff on the station it is how the
+	// activity log knows who made a change.
+	people, err := s.store.ActiveUsers(r.Context())
+	if err != nil {
+		s.renderError(w, "login: users", err)
+		return
+	}
+	page := func(status int, errMsg, who string) {
+		s.renderStatus(w, r, status, "login", map[string]any{
+			"Error": errMsg, "People": people, "Multi": len(people) > 1, "Who": who,
+		})
+	}
+
 	switch r.Method {
 	case http.MethodGet:
-		s.render(w, "login", map[string]any{})
+		page(http.StatusOK, "", "")
 	case http.MethodPost:
 		pin := strings.TrimSpace(r.FormValue("pin"))
-		sid, err := s.auth.Login(r.Context(), pin, r.UserAgent())
+		who := strings.TrimSpace(r.FormValue("username"))
+		if who == "" {
+			// One account, or an older bookmarked form: sign in as the
+			// only person there is.
+			if len(people) == 1 {
+				who = people[0].Username
+			} else {
+				who = auth.OwnerUsername
+			}
+		}
+		sid, user, err := s.auth.LoginAs(r.Context(), who, pin, r.UserAgent())
 		if err != nil {
-			msg := "Invalid credentials."
+			msg := "That PIN was not right."
 			status := http.StatusOK
 			var locked *auth.LockedError
-			if errors.As(err, &locked) {
-				msg = "Too many wrong PINs. Login is locked until " + locked.Until.Local().Format("15:04") + "."
+			switch {
+			case errors.As(err, &locked):
+				msg = "Too many wrong PINs. Sign-in for that account is locked until " +
+					locked.Until.Local().Format("15:04") + "."
 				status = http.StatusTooManyRequests
-			} else if !errors.Is(err, auth.ErrInvalidPIN) {
+			case errors.Is(err, auth.ErrInvalidPIN):
+			default:
+				msg = err.Error()
 				s.logger.Error("login", "err", err)
 			}
-			s.renderStatus(w, status, "login", map[string]any{"Error": msg})
+			// A wrong PIN is worth recording: repeated failures on a
+			// staff account are something the owner should be able to
+			// see on the Activity page.
+			s.auditAnonymous(r, storage.ActionLoginFailed, who, msg)
+			page(status, msg, who)
 			return
 		}
 		s.setSessionCookie(w, sid)
+		s.store.RecordAudit(r.Context(), storage.AuditEntry{
+			UserID: user.ID, ActorName: user.Name(), ActorRole: user.Role,
+			Source: storage.AuditSourceDashboard, Action: storage.ActionLogin,
+			Detail: "Signed in", RemoteAddr: clientIP(r),
+		})
 		http.Redirect(w, r, "/", http.StatusFound)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -192,7 +230,7 @@ func (s *Server) dashboardData(ctx context.Context) (map[string]any, error) {
 // catch-all, so any other unknown path is a 404.
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
-		s.renderStatus(w, http.StatusNotFound, "notfound", map[string]any{"LoggedIn": true})
+		s.renderStatus(w, r, http.StatusNotFound, "notfound", map[string]any{"LoggedIn": true})
 		return
 	}
 	data, err := s.dashboardData(r.Context())
@@ -200,7 +238,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, "dashboard", err)
 		return
 	}
-	s.render(w, "dashboard", data)
+	s.render(w, r, "dashboard", data)
 }
 
 // handleAsk answers a question typed into the dashboard's Ask box.
@@ -229,7 +267,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	data["Question"] = q
 	data["Answer"] = answer
-	s.render(w, "dashboard", data)
+	s.render(w, r, "dashboard", data)
 }
 
 func (s *Server) handleSales(w http.ResponseWriter, r *http.Request) {
@@ -238,7 +276,7 @@ func (s *Server) handleSales(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, "recent sales", err)
 		return
 	}
-	s.render(w, "sales", map[string]any{"LoggedIn": true, "Rows": rows})
+	s.render(w, r, "sales", map[string]any{"LoggedIn": true, "Rows": rows})
 }
 
 func (s *Server) handleCredit(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +289,7 @@ func (s *Server) handleCredit(w http.ResponseWriter, r *http.Request) {
 	if len(rows) > 0 {
 		asOf = rows[0].AsOfDate
 	}
-	s.render(w, "credit", map[string]any{"LoggedIn": true, "Rows": rows, "AsOf": asOf})
+	s.render(w, r, "credit", map[string]any{"LoggedIn": true, "Rows": rows, "AsOf": asOf})
 }
 
 func (s *Server) handleScore(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +298,7 @@ func (s *Server) handleScore(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, "latest score", err)
 		return
 	}
-	s.render(w, "score", map[string]any{
+	s.render(w, r, "score", map[string]any{
 		"LoggedIn":     true,
 		"Score":        score,
 		"ScoreIsToday": score.Date == time.Now().Format("2006-01-02"),

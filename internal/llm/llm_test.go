@@ -114,8 +114,14 @@ func TestRouter_BasicTierRefusesLLM(t *testing.T) {
 	if fc.lastModel != "" {
 		t.Errorf("fakeClient was called with model=%q, want empty (no LLM call expected)", fc.lastModel)
 	}
-	if !strings.Contains(ans, "I don't have that data") {
-		t.Errorf("answer = %q, want it to say 'I don't have that data'", ans)
+	// It must say why it cannot answer and what it can answer instead.
+	// "I don't have that data" on its own teaches the owner nothing, and
+	// is what made the Ask box feel broken.
+	if !strings.Contains(ans, "no AI model is connected") {
+		t.Errorf("answer = %q, want it to explain that no model is connected", ans)
+	}
+	if !strings.Contains(ans, "how much did we sell today?") {
+		t.Errorf("answer = %q, want it to list what can be asked", ans)
 	}
 }
 
@@ -155,8 +161,13 @@ func TestRouter_LLMFailureReturnsSafeMessage(t *testing.T) {
 	if path != "llm-fail" {
 		t.Errorf("path = %q, want llm-fail", path)
 	}
-	if !strings.Contains(ans, "I don't have that data") {
-		t.Errorf("answer = %q, want it to refuse to fabricate", ans)
+	// No figure may be invented when the model is unreachable, and the
+	// owner should be told the model was the problem, not the data.
+	if !strings.Contains(ans, "could not reach the AI model") {
+		t.Errorf("answer = %q, want it to say the model was unreachable", ans)
+	}
+	if strings.Contains(ans, "ollama down") {
+		t.Errorf("the raw error leaked to the owner: %q", ans)
 	}
 }
 

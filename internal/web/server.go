@@ -56,6 +56,14 @@ type Server struct {
 	// Pairing links the owner's phone to the station. Nil when no
 	// pairing-based channel is configured.
 	Pairing Pairer
+	// Ingest accepts data from the Data page: an uploaded export, a sale
+	// typed in by hand, and changes to which folders are watched. Nil
+	// means this build cannot take data from the dashboard.
+	Ingest Ingester
+	// Model is the answerer's model settings, so changing the provider in
+	// Settings takes effect on the next question instead of needing a
+	// restart. Nil disables the model section of the Settings page.
+	Model ModelConfigurator
 }
 
 // New builds a server. Templates are parsed at startup so any template
@@ -125,6 +133,9 @@ func (s *Server) Routes() http.Handler {
 
 	// Public.
 	mux.HandleFunc("/login", s.handleLogin)
+	// Anyone who can reach the login page can ask for a new PIN. The
+	// request grants nothing; only a signed-in owner can act on it.
+	mux.HandleFunc("/forgot", s.handleForgotPIN)
 	mux.HandleFunc("/setup", s.handleSetup)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/static/", s.handleStatic)
@@ -140,7 +151,13 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/ask", s.requireAuth(http.HandlerFunc(s.handleAsk)))
 	mux.Handle("/margin", s.requireAuth(http.HandlerFunc(s.handleMargin)))
 	mux.Handle("/customer", s.requireAuth(http.HandlerFunc(s.handleCustomer)))
-	mux.Handle("/settings", s.requireAuth(http.HandlerFunc(s.handleSettings)))
+	// Recording what happened on a shift is staff work; changing how the
+	// station is set up is the owner's.
+	mux.Handle("/data", s.requireAuth(http.HandlerFunc(s.handleData)))
+	mux.Handle("/activity", s.requireAuth(http.HandlerFunc(s.handleActivity)))
+	mux.Handle("/account", s.requireAuth(http.HandlerFunc(s.handleAccount)))
+	mux.Handle("/people", s.requireAuth(s.requireOwner(http.HandlerFunc(s.handlePeople))))
+	mux.Handle("/settings", s.requireAuth(s.requireOwner(http.HandlerFunc(s.handleSettings))))
 	mux.Handle("/messages", s.requireAuth(http.HandlerFunc(s.handleMessages)))
 	mux.Handle("/messages/qr.png", s.requireAuth(http.HandlerFunc(s.handlePairingQR)))
 	mux.Handle("/logout", s.requireAuth(http.HandlerFunc(s.handleLogout)))
@@ -168,13 +185,15 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
-		uid, err := s.auth.Verify(r.Context(), sid)
+		// Resolve the whole person, not just their id: every page shows
+		// who is signed in, and every change records who made it.
+		user, err := s.auth.CurrentUser(r.Context(), sid)
 		if err != nil {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxUserID{}, uid)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		ctx := context.WithValue(r.Context(), ctxUserID{}, user.ID)
+		next.ServeHTTP(w, r.WithContext(withUser(ctx, user)))
 	})
 }
 
@@ -239,6 +258,121 @@ func funcMap() template.FuncMap {
 		"severityClass": severityClass,
 		"messageKind":   messageKindLabel,
 		"statusClass":   messageStatusClass,
+		"auditAction":   auditActionLabel,
+		"auditClass":    auditActionClass,
+		"roleLabel":     storage.RoleLabel,
+		"ingestSource":  ingestSourceLabel,
+		"ingestOutcome": ingestOutcomeLabel,
+		"ingestClass":   ingestOutcomeClass,
+	}
+}
+
+// auditActionLabel turns an action slug into what actually happened, in
+// the owner's words. The slug is what the code filters on; this is what
+// the owner reads.
+func auditActionLabel(v any) string {
+	switch fmt.Sprint(v) {
+	case storage.ActionLogin:
+		return "Signed in"
+	case storage.ActionLoginFailed:
+		return "Wrong PIN"
+	case storage.ActionLogout:
+		return "Signed out"
+	case storage.ActionPINChanged:
+		return "PIN changed"
+	case storage.ActionPINResetAsked:
+		return "Asked for a new PIN"
+	case storage.ActionPINResetDone:
+		return "New PIN given"
+	case storage.ActionPINResetDenied:
+		return "PIN request dismissed"
+	case storage.ActionUserAdded:
+		return "Person added"
+	case storage.ActionUserChanged:
+		return "Person changed"
+	case storage.ActionUserRemoved:
+		return "Person removed"
+	case storage.ActionSaleEntered:
+		return "Sale entered by hand"
+	case storage.ActionFileImported:
+		return "File imported"
+	case storage.ActionFolderAdded:
+		return "Watch folder added"
+	case storage.ActionFolderChanged:
+		return "Watch folder changed"
+	case storage.ActionFolderRemoved:
+		return "Watch folder removed"
+	case storage.ActionPriceSet:
+		return "Purchase price set"
+	case storage.ActionCreditPayment:
+		return "Repayment recorded"
+	case storage.ActionSettingChanged:
+		return "Setting changed"
+	case storage.ActionMessagingChanged:
+		return "Messaging changed"
+	case storage.ActionModelChanged:
+		return "AI model changed"
+	case storage.ActionQuestionAnswered:
+		return "Question answered"
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// auditActionClass highlights the entries worth a second look: money
+// moving, and someone failing to sign in.
+func auditActionClass(v any) string {
+	switch fmt.Sprint(v) {
+	case storage.ActionLoginFailed, storage.ActionUserRemoved:
+		return "alert"
+	case storage.ActionPINResetAsked, storage.ActionPINResetDone, storage.ActionPINResetDenied:
+		return "warn"
+	case storage.ActionSaleEntered, storage.ActionCreditPayment, storage.ActionPriceSet:
+		return "warn"
+	default:
+		return ""
+	}
+}
+
+// ingestSourceLabel says how a batch of data reached FuelMind, in the
+// owner's words rather than the column's.
+func ingestSourceLabel(v any) string {
+	switch fmt.Sprint(v) {
+	case storage.IngestSourceFolder:
+		return "Watched folder"
+	case storage.IngestSourceUpload:
+		return "Imported file"
+	case storage.IngestSourceManual:
+		return "Entered by hand"
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// ingestOutcomeLabel turns an outcome into something that reads like an
+// answer to "did my data get in?".
+func ingestOutcomeLabel(v any) string {
+	switch fmt.Sprint(v) {
+	case storage.IngestOK:
+		return "All in"
+	case storage.IngestPartial:
+		return "Some rows skipped"
+	case storage.IngestFailed:
+		return "Nothing taken in"
+	default:
+		return fmt.Sprint(v)
+	}
+}
+
+// ingestOutcomeClass colours that outcome.
+func ingestOutcomeClass(v any) string {
+	switch fmt.Sprint(v) {
+	case storage.IngestOK:
+		return "ok"
+	case storage.IngestFailed:
+		return "alert"
+	default:
+		return "warn"
 	}
 }
 
@@ -278,11 +412,14 @@ func severityClass(s any) string {
 
 // render executes a page into a buffer first, so a template error becomes
 // a clean 500 instead of half a page served with status 200.
-func (s *Server) render(w http.ResponseWriter, name string, data map[string]any) {
-	s.renderStatus(w, http.StatusOK, name, data)
+func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
+	s.renderStatus(w, r, http.StatusOK, name, data)
 }
 
-func (s *Server) renderStatus(w http.ResponseWriter, status int, name string, data map[string]any) {
+// renderStatus writes one page. It fills in the things every page needs
+// — the version in the footer, and who is signed in, which decides what
+// the navigation offers — so no handler can forget them.
+func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, status int, name string, data map[string]any) {
 	tmpl, ok := s.pages[strings.TrimSuffix(name, ".html")]
 	if !ok {
 		s.logger.Error("template not found", "template", name)
@@ -293,6 +430,21 @@ func (s *Server) renderStatus(w http.ResponseWriter, status int, name string, da
 		data = map[string]any{}
 	}
 	data["Version"] = s.Version
+	user, ok := data["User"].(storage.User)
+	if !ok {
+		user = userFrom(r.Context())
+		data["User"] = user
+	}
+	// The badge on People. An owner should find out that someone cannot
+	// sign in by opening FuelMind, not by being telephoned.
+	if _, set := data["PINRequests"]; !set {
+		data["PINRequests"] = 0
+		if user.IsOwner() {
+			if reqs, err := s.store.PendingPINResets(r.Context()); err == nil {
+				data["PINRequests"] = len(reqs)
+			}
+		}
+	}
 	var buf bytes.Buffer
 	if err := tmpl.ExecuteTemplate(&buf, "base", data); err != nil {
 		s.logger.Error("template render", "template", name, "err", err)

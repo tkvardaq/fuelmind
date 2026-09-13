@@ -26,28 +26,32 @@ var requiredColumns = []string{
 	"payment_method",
 }
 
-// ParseError is a non-fatal per-row error. In v1 any per-row error sends
-// the whole file to failed/ (strict mode).
+// ParseError is a non-fatal per-row error. The rows around it are still
+// ingested; this row is written to a rejects file the owner can correct
+// and drop back in. Record is the row as it was read, so the rejects
+// file can reproduce it verbatim.
 type ParseError struct {
-	Line int    `json:"line"`
-	Err  string `json:"err"`
+	Line   int      `json:"line"`
+	Err    string   `json:"err"`
+	Record []string `json:"-"`
 }
 
 func (e ParseError) Error() string {
 	return fmt.Sprintf("line %d: %s", e.Line, e.Err)
 }
 
-// parseFile reads a CSV file from r and returns the parsed rows plus
-// any per-row errors. A non-nil error is a file-level failure (bad
-// header, unreadable).
-func parseFile(r io.Reader) (rows []posadapter.RawTransaction, rowErrs []ParseError, err error) {
+// parseFile reads a CSV file from r and returns the parsed rows, any
+// per-row errors, and the file's header. A non-nil error is a file-level
+// failure (bad header, unreadable) — that is the only case in which
+// nothing at all is ingested.
+func parseFile(r io.Reader) (rows []posadapter.RawTransaction, rowErrs []ParseError, header []string, err error) {
 	cr := csv.NewReader(r)
 	cr.TrimLeadingSpace = true
 	cr.FieldsPerRecord = -1
 
-	header, err := cr.Read()
+	header, err = cr.Read()
 	if err != nil {
-		return nil, nil, fmt.Errorf("read header: %w", err)
+		return nil, nil, nil, fmt.Errorf("read header: %w", err)
 	}
 	// Normalize header names: Excel's "CSV UTF-8" adds a byte-order mark
 	// to the first cell, and some POS systems upper-case column names.
@@ -61,7 +65,7 @@ func parseFile(r io.Reader) (rows []posadapter.RawTransaction, rowErrs []ParseEr
 	}
 	for _, req := range requiredColumns {
 		if _, ok := col[req]; !ok {
-			return nil, nil, fmt.Errorf("missing required column %q in header %v", req, header)
+			return nil, nil, nil, fmt.Errorf("missing required column %q in header %v", req, header)
 		}
 	}
 
@@ -73,7 +77,7 @@ func parseFile(r io.Reader) (rows []posadapter.RawTransaction, rowErrs []ParseEr
 			break
 		}
 		if readErr != nil {
-			rowErrs = append(rowErrs, ParseError{Line: lineNum, Err: readErr.Error()})
+			rowErrs = append(rowErrs, ParseError{Line: lineNum, Err: readErr.Error(), Record: rec})
 			continue
 		}
 		if len(rec) == 1 && strings.TrimSpace(rec[0]) == "" {
@@ -81,14 +85,15 @@ func parseFile(r io.Reader) (rows []posadapter.RawTransaction, rowErrs []ParseEr
 		}
 		if len(rec) < len(header) {
 			rowErrs = append(rowErrs, ParseError{
-				Line: lineNum,
-				Err:  fmt.Sprintf("row has %d columns, expected %d", len(rec), len(header)),
+				Line:   lineNum,
+				Err:    fmt.Sprintf("row has %d columns, expected %d", len(rec), len(header)),
+				Record: rec,
 			})
 			continue
 		}
 		source := strings.TrimSpace(rec[col["pos_source_id"]])
 		if source == "" {
-			rowErrs = append(rowErrs, ParseError{Line: lineNum, Err: "pos_source_id is empty"})
+			rowErrs = append(rowErrs, ParseError{Line: lineNum, Err: "pos_source_id is empty", Record: rec})
 			continue
 		}
 
@@ -96,15 +101,16 @@ func parseFile(r io.Reader) (rows []posadapter.RawTransaction, rowErrs []ParseEr
 		ts, terr := normalizer.ParseTimestamp(occurredAtStr, time.Local)
 		if terr != nil {
 			rowErrs = append(rowErrs, ParseError{
-				Line: lineNum,
-				Err:  fmt.Sprintf("bad occurred_at %q: expected RFC 3339 with or without time zone, e.g. 2026-09-07T08:14:22", occurredAtStr),
+				Line:   lineNum,
+				Err:    fmt.Sprintf("bad occurred_at %q: expected RFC 3339 with or without time zone, e.g. 2026-09-07T08:14:22", occurredAtStr),
+				Record: rec,
 			})
 			continue
 		}
 
 		payload, jerr := csvRowToJSON(rec, header)
 		if jerr != nil {
-			rowErrs = append(rowErrs, ParseError{Line: lineNum, Err: fmt.Sprintf("json marshal: %v", jerr)})
+			rowErrs = append(rowErrs, ParseError{Line: lineNum, Err: fmt.Sprintf("json marshal: %v", jerr), Record: rec})
 			continue
 		}
 
@@ -117,7 +123,7 @@ func parseFile(r io.Reader) (rows []posadapter.RawTransaction, rowErrs []ParseEr
 		})
 	}
 
-	return rows, rowErrs, nil
+	return rows, rowErrs, header, nil
 }
 
 // csvRowToJSON turns one CSV row into a JSON object keyed by the

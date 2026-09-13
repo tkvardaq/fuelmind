@@ -29,13 +29,30 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// ownersFor picks the owner numbers that apply to one station: a bare
+// -owner-number applies to every station, and STATION_ID=NUMBER only to
+// that one.
+func ownersFor(entries stringList, stationID string) []string {
+	var out []string
+	for _, e := range entries {
+		id, number, scoped := strings.Cut(e, "=")
+		switch {
+		case !scoped:
+			out = append(out, strings.TrimSpace(e))
+		case id == stationID:
+			out = append(out, strings.TrimSpace(number))
+		}
+	}
+	return out
+}
+
 type stringList []string
 
 func (s *stringList) String() string     { return strings.Join(*s, ",") }
 func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
 
 func main() {
-	var stations, releases stringList
+	var stations, releases, ownerNumbers stringList
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
 	dbPath := flag.String("db", "", "register the station from this fuelmind.db")
 	adminToken := flag.String("admin-token", "", "bearer token for /v1/admin (empty disables the admin API)")
@@ -44,6 +61,7 @@ func main() {
 	tier := flag.String("tier", "private", "licence tier for registered stations")
 	flag.Var(&stations, "station", "station to register as ID=APIKEY (repeatable)")
 	flag.Var(&releases, "release", "release to publish as VERSION=path-to-artifact.zip (repeatable)")
+	flag.Var(&ownerNumbers, "owner-number", "phone number allowed to ask a station questions, as NUMBER or STATION_ID=NUMBER (repeatable)")
 	flag.Parse()
 
 	srv := cloudctl.New()
@@ -65,12 +83,17 @@ func main() {
 		if !ok {
 			log.Fatalf("devcloud: -station %q must be ID=APIKEY", s)
 		}
+		owners := ownersFor(ownerNumbers, id)
 		srv.AddStation(&cloudctl.Station{
 			StationID: id, APIKey: key, Tier: *tier, Status: "active",
 			FeaturesJSON: map[string]any{"whatsapp_enabled": false, "cloud_backup_enabled": false},
 			ValidFrom:    time.Now(),
+			OwnerNumbers: owners,
 		})
-		log.Printf("station %s registered (tier %s)", id, *tier)
+		log.Printf("station %s registered (tier %s, %d owner number(s))", id, *tier, len(owners))
+	}
+	if *webhookToken != "" && len(ownerNumbers) == 0 {
+		log.Print("warning: the webhook is on but no -owner-number is registered, so it will answer nobody")
 	}
 
 	for _, r := range releases {
@@ -101,7 +124,11 @@ func main() {
 		log.Printf("serving artifacts from %s", *artifacts)
 	}
 	if *webhookToken != "" {
-		log.Printf("WhatsApp/SMS webhook: POST http://%s/v1/whatsapp/webhook?station_id=<ID>&token=<webhook token>", *addr)
+		// No station_id: the station is resolved from the sending phone
+		// number, which is the only part of an inbound message that says
+		// who the sender actually is.
+		log.Printf("WhatsApp/SMS webhook: POST http://%s/v1/whatsapp/webhook?token=<webhook token>", *addr)
+		log.Printf("  the station is chosen by the sender's number; register one with -owner-number")
 	}
 	log.Printf("devcloud listening on http://%s", *addr)
 	server := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}

@@ -18,12 +18,18 @@
       <a href="/credit">Credit</a>
       <a href="/score">Score</a>
       <a href="/margin">Margin</a>
+      <a href="/data">Data</a>
+      <a href="/activity">Activity</a>
       <a href="/messages">Messages</a>
-      <a href="/settings">Settings</a>
+      {{if .User.IsOwner}}<a href="/people">People{{if .PINRequests}} <span class="badge alert">{{.PINRequests}}</span>{{end}}</a>
+      <a href="/settings">Settings</a>{{end}}
     </nav>
-    <form method="post" action="/logout" class="logout-form">
-      <button class="btn-link" type="submit">Log out</button>
-    </form>
+    <div class="topbar-right">
+      <a href="/account" class="whoami">{{.User.Name}}</a>
+      <form method="post" action="/logout" class="logout-form">
+        <button class="btn-link" type="submit">Log out</button>
+      </form>
+    </div>
   </header>
   {{end}}
   <main id="main-content">

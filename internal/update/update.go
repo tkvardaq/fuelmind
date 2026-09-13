@@ -249,7 +249,7 @@ func (a *Agent) stage(ctx context.Context, rel Release) error {
 	a.saveState(ctx, State{Version: rel.Version, Status: "downloading"})
 	dctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	if err := Download(dctx, a.cfg.HTTPClient, artifactURL.String(), artifact); err != nil {
+	if err := downloadWithRestart(dctx, a.cfg.HTTPClient, artifactURL.String(), artifact); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 	sum, err := fileSHA256(artifact)
@@ -349,6 +349,19 @@ func writeZipEntry(f *zip.File, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// downloadWithRestart runs Download and honours errRangeRestart: when the
+// server rejects the resume range (the artifact was replaced while a
+// partial file was on disk), Download has already deleted the stale
+// partial, so a single clean retry succeeds. Without this the update
+// waited for the next check cycle to make progress it could make now.
+func downloadWithRestart(ctx context.Context, client *http.Client, rawURL, dst string) error {
+	err := Download(ctx, client, rawURL, dst)
+	if errors.Is(err, errRangeRestart) {
+		return Download(ctx, client, rawURL, dst)
+	}
+	return err
 }
 
 // errRangeRestart asks the caller to retry the download from scratch.

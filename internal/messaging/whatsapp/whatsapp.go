@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
@@ -50,7 +52,24 @@ type Client struct {
 	qrCode  string    // the code currently displayed for pairing, if any
 	qrUntil time.Time // when that code expires
 	pairErr string
+	inbound InboundHandler
 }
+
+// InboundHandler answers a message the station received. Returning an
+// empty string sends nothing back, which is what an ignored message
+// looks like.
+//
+// The handler is called on its own goroutine, one per message, so a slow
+// answer never blocks the WhatsApp connection's event loop.
+type InboundHandler func(ctx context.Context, from, text string) string
+
+// inboundTimeout bounds how long one answer may take. A person is
+// waiting on their phone; past this they would assume it is broken
+// anyway, and WhatsApp itself will not hold the connection forever.
+const inboundTimeout = 30 * time.Second
+
+// maxInboundLength caps an incoming message before it is handed on.
+const maxInboundLength = 1000
 
 // SessionFile is the pairing database, kept beside the main one.
 const SessionFile = "whatsapp.db"
@@ -85,6 +104,9 @@ func Open(ctx context.Context, dir string, logger *slog.Logger) (*Client, error)
 	c := &Client{log: logger, db: db, container: container}
 	c.cli = whatsmeow.NewClient(device, waLog.Noop)
 	c.cli.EnableAutoReconnect = true
+	// Listen before connecting, so a message that arrives during the
+	// first handshake is not dropped.
+	c.cli.AddEventHandler(c.handleEvent)
 
 	if c.cli.Store.ID != nil {
 		if err := c.cli.Connect(); err != nil {
@@ -145,6 +167,82 @@ func (c *Client) Send(ctx context.Context, to, body string) error {
 		return fmt.Errorf("whatsapp: send to %s: %w", to, err)
 	}
 	return nil
+}
+
+// SetInbound installs the handler that answers incoming messages. Until
+// one is set, the station listens but says nothing — which is what an
+// unconfigured station should do.
+func (c *Client) SetInbound(h InboundHandler) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.inbound = h
+}
+
+// handleEvent is whatsmeow's callback. It runs on the connection's event
+// loop, so it must return quickly: the actual answering happens on its
+// own goroutine.
+func (c *Client) handleEvent(evt any) {
+	msg, ok := evt.(*events.Message)
+	if !ok {
+		return
+	}
+	c.mu.Lock()
+	handler := c.inbound
+	c.mu.Unlock()
+	if handler == nil {
+		return
+	}
+
+	// Only one-to-one messages from another person. A station must never
+	// answer into a group, reply to its own outgoing messages (which
+	// would loop), or respond to a status broadcast.
+	if msg.Info.IsFromMe || msg.Info.IsGroup || msg.Info.Chat.Server == types.BroadcastServer {
+		return
+	}
+	text := messageText(msg)
+	if text == "" {
+		return // a photo, a sticker, a reaction: nothing to answer
+	}
+	if len(text) > maxInboundLength {
+		text = text[:maxInboundLength]
+	}
+	from := msg.Info.Sender.User
+	chat := msg.Info.Chat
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), inboundTimeout)
+		defer cancel()
+		reply := handler(ctx, from, text)
+		if strings.TrimSpace(reply) == "" {
+			return
+		}
+		if _, err := c.cli.SendMessage(ctx, chat, &waE2E.Message{
+			Conversation: proto.String(reply),
+		}); err != nil {
+			c.log.Warn("whatsapp: could not send the reply", "to", from, "err", err)
+		}
+	}()
+}
+
+// messageText pulls the words out of the message shapes a person can
+// actually type: a plain message, one with a link preview or a mention,
+// and the caption on a photo.
+func messageText(msg *events.Message) string {
+	m := msg.Message
+	if m == nil {
+		return ""
+	}
+	switch {
+	case m.GetConversation() != "":
+		return strings.TrimSpace(m.GetConversation())
+	case m.GetExtendedTextMessage().GetText() != "":
+		return strings.TrimSpace(m.GetExtendedTextMessage().GetText())
+	case m.GetImageMessage().GetCaption() != "":
+		return strings.TrimSpace(m.GetImageMessage().GetCaption())
+	case m.GetVideoMessage().GetCaption() != "":
+		return strings.TrimSpace(m.GetVideoMessage().GetCaption())
+	}
+	return ""
 }
 
 // Close disconnects and releases the session database.

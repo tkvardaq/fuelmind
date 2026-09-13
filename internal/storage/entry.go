@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/fuelmind/fuelmind/internal/phone"
 )
 
 // --- purchase prices (what the station paid per litre) ---
@@ -82,6 +84,9 @@ func (s *Storage) RecordCreditPayment(ctx context.Context, p CreditPayment) erro
 	if p.Method == "" {
 		p.Method = "CASH"
 	}
+	// Match the form the sales rows are stored in, so a repayment typed
+	// as "0300 1234567" pays off sales that arrived as "+923001234567".
+	p.CustomerPhone = phone.Normalize(p.CustomerPhone)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO credit_payments (customer_phone, paid_on, amount, method, note)
 		VALUES (?, ?, ?, ?, ?)`,
@@ -90,11 +95,11 @@ func (s *Storage) RecordCreditPayment(ctx context.Context, p CreditPayment) erro
 }
 
 // CreditPayments lists a customer's repayments, newest first.
-func (s *Storage) CreditPayments(ctx context.Context, phone string, limit int) ([]CreditPayment, error) {
+func (s *Storage) CreditPayments(ctx context.Context, customer string, limit int) ([]CreditPayment, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, customer_phone, paid_on, amount, method, COALESCE(note, '')
 		FROM credit_payments WHERE customer_phone = ?
-		ORDER BY paid_on DESC, id DESC LIMIT ?`, phone, limit)
+		ORDER BY paid_on DESC, id DESC LIMIT ?`, phone.Normalize(customer), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -119,12 +124,12 @@ type CustomerSale struct {
 }
 
 // CustomerCreditHistory returns a customer's credit sales, newest first.
-func (s *Storage) CustomerCreditHistory(ctx context.Context, phone string, limit int) ([]CustomerSale, error) {
+func (s *Storage) CustomerCreditHistory(ctx context.Context, customer string, limit int) ([]CustomerSale, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT transaction_time, product_code, quantity_liters, total_amount
 		FROM transactions
 		WHERE payment_method = 'CREDIT' AND customer_phone = ?
-		ORDER BY transaction_time DESC LIMIT ?`, phone, limit)
+		ORDER BY transaction_time DESC LIMIT ?`, phone.Normalize(customer), limit)
 	if err != nil {
 		return nil, err
 	}

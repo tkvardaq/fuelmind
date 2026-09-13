@@ -92,16 +92,35 @@ func status(ctx context.Context, store *storage.Storage, cfg *config.Config) err
 	}
 	fmt.Println("  remote questions:", remote, "(fuelmind-setup remote-ask on|off)")
 
-	// POS drop folder: exists, writable, and what is waiting in it.
-	drop := filepath.Join(cfg.DataDir, "pos_drop")
-	pending, ferr := countCSVs(drop)
+	// Every folder the station watches, not just the built-in one: the
+	// owner points FuelMind at wherever their POS already writes, so
+	// reporting only the built-in folder would say "0 processed" while
+	// the real data is flowing in somewhere else.
+	folders, ferr := store.WatchFolders(ctx)
 	switch {
 	case ferr != nil:
-		fmt.Println("  POS folder:    NOT USABLE:", ferr)
+		fmt.Println("  POS folders:   could not be read:", ferr)
+	case len(folders) == 0:
+		fmt.Println("  POS folders:   none configured (add one on the dashboard's Data page)")
 	default:
-		failed, _ := countCSVs(filepath.Join(drop, "failed"))
-		processed, _ := countCSVs(filepath.Join(drop, "processed"))
-		fmt.Printf("  POS folder:    %s (%d waiting, %d processed, %d failed)\n", drop, pending, processed, failed)
+		fmt.Println("  POS folders:")
+		for _, f := range folders {
+			state := "watching"
+			if !f.Enabled {
+				state = "switched off"
+			}
+			pending, err := countCSVs(f.Path)
+			if err != nil {
+				fmt.Printf("    %-6s %s  NOT USABLE: %v\n", state, f.Path, err)
+				continue
+			}
+			processed, _ := countCSVs(filepath.Join(f.Path, "processed"))
+			failed, _ := countCSVs(filepath.Join(f.Path, "failed"))
+			fmt.Printf("    %s  %s (%d waiting, %d processed, %d failed)\n", state, f.Path, pending, processed, failed)
+			if f.LastError != "" {
+				fmt.Printf("           last problem: %s\n", f.LastError)
+			}
+		}
 	}
 	if last, err := store.LastPosIngestionAt(ctx); err == nil && !last.IsZero() {
 		fmt.Println("  last POS file:", last.Local().Format(time.RFC1123))

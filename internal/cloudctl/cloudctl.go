@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fuelmind/fuelmind/internal/phone"
 	"github.com/fuelmind/fuelmind/internal/version"
 )
 
@@ -38,6 +39,29 @@ type Station struct {
 	Status       string         // "active" | "inactive" | "suspended"
 	ValidFrom    time.Time
 	ValidUntil   *time.Time
+
+	// OwnerNumbers are the phone numbers allowed to ask this station
+	// questions over WhatsApp/SMS. A station with none registered
+	// answers nobody: a station id is printed on a dashboard and is not
+	// a secret, so it cannot be what decides who gets to see a station's
+	// takings. Numbers are matched in canonical form, so the owner may
+	// register "0300 1234567" and message from "+92 300 1234567".
+	OwnerNumbers []string
+}
+
+// ownsNumber reports whether `from` is one of the station's registered
+// owner numbers.
+func (st *Station) ownsNumber(from string) bool {
+	want := phone.Normalize(from)
+	if want == "" {
+		return false
+	}
+	for _, n := range st.OwnerNumbers {
+		if phone.Normalize(n) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateRelease is the manifest returned by /v1/updates/check.
@@ -77,6 +101,9 @@ type Server struct {
 
 	messages map[string]*Message
 	order    []string
+
+	limiterOnce sync.Once
+	limiter     *rateLimiter
 }
 
 // New returns a fresh Server with no stations preloaded.

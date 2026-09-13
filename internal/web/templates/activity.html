@@ -1,0 +1,69 @@
+{{define "body"}}
+<div class="page">
+  <h1>Activity</h1>
+  <p class="muted">
+    Everything that changed the station's records: who did it, when, and from where.
+    Figures that arrived on their own from a POS export are on the Data page;
+    this is the log of what people did.
+  </p>
+
+  <form method="get" action="/activity" class="ask">
+    <label for="f-user" class="sr-only">Who</label>
+    <select id="f-user" name="user">
+      <option value="">Everyone</option>
+      {{range .People}}
+      <option value="{{.ID}}" {{if eq .ID $.FilterUser}}selected{{end}}>{{.Name}}</option>
+      {{end}}
+    </select>
+    <label for="f-action" class="sr-only">What</label>
+    <select id="f-action" name="action">
+      <option value="">Everything</option>
+      {{range .Actions}}
+      <option value="{{.}}" {{if eq . $.FilterAction}}selected{{end}}>{{auditAction .}}</option>
+      {{end}}
+    </select>
+    <label for="f-days" class="sr-only">How far back</label>
+    <select id="f-days" name="days">
+      <option value="1" {{if eq .Days 1}}selected{{end}}>Today</option>
+      <option value="7" {{if eq .Days 7}}selected{{end}}>Last 7 days</option>
+      <option value="30" {{if eq .Days 30}}selected{{end}}>Last 30 days</option>
+      <option value="90" {{if eq .Days 90}}selected{{end}}>Last 90 days</option>
+    </select>
+    <button type="submit">Show</button>
+  </form>
+
+  {{if .Entries}}
+  <div class="table-wrap">
+  <table class="data">
+    <thead>
+      <tr><th>When</th><th>Who</th><th>What</th><th>Details</th><th>From</th></tr>
+    </thead>
+    <tbody>
+      {{range .Entries}}
+      <tr>
+        <td>{{.OccurredAt.Local.Format "2 Jan 15:04"}}</td>
+        <td>
+          {{.ActorName}}
+          {{if .ActorRole}}<div class="small muted">{{roleLabel .ActorRole}}</div>{{end}}
+        </td>
+        <td class="{{auditClass .Action}}">{{auditAction .Action}}</td>
+        <td>
+          {{if .Detail}}{{.Detail}}{{else}}<span class="muted">&mdash;</span>{{end}}
+          {{if .Subject}}<div class="small muted">{{.Subject}}</div>{{end}}
+        </td>
+        <td class="small muted">
+          {{if eq .Source "whatsapp"}}WhatsApp
+          {{else if .RemoteAddr}}{{.RemoteAddr}}
+          {{else}}{{.Source}}{{end}}
+        </td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="muted">Nothing has been changed in this period.</p>
+  {{end}}
+</div>
+{{end}}
+{{template "base" .}}

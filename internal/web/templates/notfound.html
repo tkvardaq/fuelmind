@@ -1,7 +1,12 @@
 {{define "body"}}
 <div class="page">
+  {{if .Title}}
+  <h1>{{.Title}}</h1>
+  <p class="muted">{{.Message}} <a href="/">Go to Today</a>.</p>
+  {{else}}
   <h1>Page not found</h1>
   <p class="muted">There is no page at this address. <a href="/">Go to Today</a>.</p>
+  {{end}}
 </div>
 {{end}}
 {{template "base" .}}

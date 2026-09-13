@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fuelmind/fuelmind/internal/phone"
 	"github.com/fuelmind/fuelmind/internal/storage"
 )
 
@@ -179,7 +180,7 @@ func (n *Normalizer) normalizeRow(r storage.RawTransaction) (storage.NormalizedT
 		UnitPrice:        price,
 		TotalAmount:      total,
 		PaymentMethod:    pay,
-		CustomerPhone:    strings.TrimSpace(row["customer_phone"]),
+		CustomerPhone:    phone.Normalize(row["customer_phone"]),
 		PumpID:           strings.TrimSpace(row["pump_id"]),
 		Attendant:        strings.TrimSpace(row["attendant"]),
 		TransactionTime:  t.In(n.loc).Format(time.RFC3339),

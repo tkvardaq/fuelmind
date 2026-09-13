@@ -15,6 +15,14 @@ import (
 	"time"
 )
 
+// DefaultHour is the local hour the nightly backup runs at when
+// Config.Hour is left unset. HourMidnight asks for 00:00 explicitly,
+// which the zero value cannot express.
+const (
+	DefaultHour  = 2
+	HourMidnight = 24
+)
+
 // Store is the part of storage the agent needs.
 type Store interface {
 	BackupTo(ctx context.Context, dst string) error
@@ -26,7 +34,8 @@ type Config struct {
 	DataDir string
 	// Store is the live database. Required.
 	Store Store
-	// Hour is the local hour to run at (default 2 = 02:00 station time).
+	// Hour is the local hour to run at. Unset means DefaultHour (02:00
+	// station time); use HourMidnight to ask for 00:00 explicitly.
 	Hour int
 	// Keep is how many backups to retain (default 7).
 	Keep   int
@@ -43,6 +52,13 @@ func NewAgent(cfg Config) *Agent {
 	}
 	if cfg.Keep <= 0 {
 		cfg.Keep = 7
+	}
+	// Hour 0 is a real value (midnight), but it is not what the field
+	// documents, and a caller that leaves Config.Hour unset means "use
+	// the default". Treat the zero value as 02:00 so a backup never
+	// lands in the middle of the evening cash-up by accident.
+	if cfg.Hour == 0 {
+		cfg.Hour = DefaultHour
 	}
 	return &Agent{cfg: cfg}
 }
@@ -70,7 +86,11 @@ func (a *Agent) run(ctx context.Context) {
 
 // nextRun is the next occurrence of Hour in local (station) time.
 func (a *Agent) nextRun(now time.Time) time.Time {
-	next := time.Date(now.Year(), now.Month(), now.Day(), a.cfg.Hour, 0, 0, 0, now.Location())
+	hour := a.cfg.Hour
+	if hour == HourMidnight {
+		hour = 0
+	}
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location())
 	if !next.After(now) {
 		next = next.AddDate(0, 0, 1)
 	}

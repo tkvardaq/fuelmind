@@ -146,8 +146,8 @@ func TestLoginWithWrongPIN(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("status = %d, want 200 (login re-renders with error)", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "Invalid credentials") {
-		t.Error("login error not shown")
+	if !strings.Contains(w.Body.String(), "That PIN was not right") {
+		t.Errorf("login error not shown: %s", w.Body.String())
 	}
 }
 

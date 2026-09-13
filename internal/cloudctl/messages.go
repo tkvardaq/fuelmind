@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/fuelmind/fuelmind/internal/phone"
 )
 
 // Message is one question routed to a station and the answer it sent
@@ -194,11 +196,23 @@ func (s *Server) handleAdminMessages(w http.ResponseWriter, r *http.Request) {
 // (From/Body, or from/text) and replies with TwiML, which Twilio sends
 // straight back to the sender. Point the provider at:
 //
-//	POST /v1/whatsapp/webhook?station_id=FM-XXXXXXX&token=<webhook token>
+//	POST /v1/whatsapp/webhook?token=<webhook token>
 //
-// The token is the shared secret configured on the server; without it the
-// endpoint is disabled, so nobody can ask a station questions by guessing
-// its id.
+// Two separate things are checked, and both matter:
+//
+//   - The token authenticates the *gateway*. It is shared by every
+//     station on this control plane, so it says "this request really came
+//     from our SMS provider" and nothing more.
+//   - The sender's phone number authenticates the *person*. The station
+//     is resolved from that number, not from a station_id in the query.
+//
+// The second check is the one that keeps a station's takings private. A
+// station id is printed on a dashboard and handed to a provider; it is an
+// identifier, not a secret. If the station were taken from the query
+// string, anyone holding the shared gateway token could read any
+// station's revenue and credit book by naming its id. So a number that is
+// not registered to a station is refused, and a station_id in the query
+// is only ever used to cross-check, never to select.
 func (s *Server) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -217,11 +231,32 @@ func (s *Server) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	stationID := firstNonEmpty(q.Get("station_id"), r.FormValue("station_id"))
-	from := firstNonEmpty(r.FormValue("From"), r.FormValue("from"), "unknown")
+	from := senderNumber(firstNonEmpty(r.FormValue("From"), r.FormValue("from")))
 	text := firstNonEmpty(r.FormValue("Body"), r.FormValue("text"), r.FormValue("message"))
 
-	msg, err := s.Enqueue(stationID, from, text, "whatsapp")
+	// Rate limit per sender, before any lookup: an unthrottled endpoint
+	// lets a caller work through the number space at machine speed.
+	if !s.webhookLimiter().allow(phone.Normalize(from)) {
+		writeTwiML(w, "Too many messages just now. Please try again in a minute.")
+		return
+	}
+
+	station, ok := s.stationForNumber(from)
+	if !ok {
+		// Deliberately the same answer as "station offline": a stranger
+		// probing numbers learns nothing about which ones are registered.
+		writeTwiML(w, "This number is not registered with a station. Ask the owner to add it in Settings.")
+		return
+	}
+	// A station_id in the query is a cross-check only. When it disagrees
+	// with the number's own station, the request is refused rather than
+	// silently answered for the wrong station.
+	if claimed := strings.TrimSpace(q.Get("station_id")); claimed != "" && claimed != station.StationID {
+		http.Error(w, "station_id does not match the sending number", http.StatusForbidden)
+		return
+	}
+
+	msg, err := s.Enqueue(station.StationID, from, text, "whatsapp")
 	if err != nil {
 		writeTwiML(w, "I could not reach that station just now.")
 		return
@@ -232,6 +267,39 @@ func (s *Server) handleWhatsAppWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeTwiML(w, answered.Answer)
+}
+
+// senderNumber strips the channel prefix gateways put in front of the
+// number ("whatsapp:+923001234567", "sms:+923001234567") so what is left
+// is something phone.Normalize can read.
+func senderNumber(from string) string {
+	from = strings.TrimSpace(from)
+	if i := strings.LastIndex(from, ":"); i >= 0 {
+		from = from[i+1:]
+	}
+	return strings.TrimSpace(from)
+}
+
+// stationForNumber finds the active station a phone number is registered
+// to. A number registered to more than one station is refused rather than
+// guessed at.
+func (s *Server) stationForNumber(from string) (*Station, bool) {
+	if strings.TrimSpace(from) == "" {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found *Station
+	for _, st := range s.stations {
+		if st.Status != "active" || !st.ownsNumber(from) {
+			continue
+		}
+		if found != nil {
+			return nil, false // ambiguous: registered to two stations
+		}
+		found = st
+	}
+	return found, found != nil
 }
 
 func (s *Server) webhookWait() time.Duration {

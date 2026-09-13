@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fuelmind/fuelmind/internal/messaging"
+	"github.com/fuelmind/fuelmind/internal/storage"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -57,17 +58,18 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := map[string]any{
-		"LoggedIn":    true,
-		"Settings":    settings,
-		"Outbox":      sent,
-		"Questions":   questions,
-		"Queued":      queued,
-		"Delivered":   delivered,
-		"Failed":      failed,
-		"Hours":       hourChoices(),
-		"Error":       formError,
-		"Notice":      notice,
-		"ChannelName": "WhatsApp",
+		"LoggedIn":         true,
+		"Settings":         settings,
+		"Outbox":           sent,
+		"Questions":        questions,
+		"Queued":           queued,
+		"Delivered":        delivered,
+		"Failed":           failed,
+		"Hours":            hourChoices(),
+		"Error":            formError,
+		"Notice":           notice,
+		"ChannelName":      "WhatsApp",
+		"AnswersQuestions": messaging.AnswerQuestionsEnabled(r.Context(), s.store),
 	}
 	if s.Pairing != nil {
 		code, pairErr := s.Pairing.PairingCode()
@@ -80,7 +82,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			data["Error"] = "Pairing did not finish: " + pairErr
 		}
 	}
-	s.render(w, "messages", data)
+	s.render(w, r, "messages", data)
 }
 
 // messagesAction applies one button press and returns what to tell the
@@ -132,6 +134,22 @@ func (s *Server) messagesAction(r *http.Request) (formError, notice string) {
 			return "Could not send the queued messages: " + err.Error(), ""
 		}
 		return "", "Sent everything that was waiting."
+
+	case "answer_questions":
+		on := r.FormValue("answer_questions") == "on"
+		if err := messaging.SetAnswerQuestions(r.Context(), s.store, on); err != nil {
+			return err.Error(), ""
+		}
+		state := "off"
+		if on {
+			state = "on"
+		}
+		s.audit(r, storage.ActionMessagingChanged, "answer_questions",
+			"Turned answering questions over WhatsApp "+state)
+		if on {
+			return "", "Message the station's WhatsApp from your number and it will answer. Send \"help\" to see what it can tell you."
+		}
+		return "", "The station will no longer answer messages. It can still send you the evening summary."
 
 	case "pair":
 		if s.Pairing == nil {

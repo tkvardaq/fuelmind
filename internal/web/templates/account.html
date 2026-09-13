@@ -1,0 +1,55 @@
+{{define "body"}}
+<div class="page">
+  <h1>Your account</h1>
+  <p class="muted">
+    Signed in as <strong>{{.Me.Name}}</strong> ({{roleLabel .Me.Role}}).
+  </p>
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  <section>
+    <h2>Change your PIN</h2>
+    <p class="muted">
+      Change it whenever you think someone else has seen it &mdash; you do not
+      need to ask anyone. You will be signed out everywhere once it changes, so
+      sign in again with the new PIN.
+    </p>
+    <form method="post" action="/account" class="entry-form">
+      <div class="field">
+        <label for="current_pin">Your PIN now</label>
+        <input type="password" id="current_pin" name="current_pin" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label for="new_pin">New PIN</label>
+        <input type="password" id="new_pin" name="new_pin" autocomplete="new-password"
+               placeholder="At least {{.MinPIN}} characters" required>
+      </div>
+      <div class="field">
+        <label for="confirm_pin">New PIN again</label>
+        <input type="password" id="confirm_pin" name="confirm_pin" autocomplete="new-password" required>
+      </div>
+      <div class="field actions">
+        <button type="submit">Change my PIN</button>
+      </div>
+    </form>
+  </section>
+
+  <section>
+    <h2>If you forget it</h2>
+    <p class="muted">
+      On the sign-in page, choose your name and use <strong>I've forgotten my PIN</strong>.
+      That tells the station owner, who can set you a new one. It does not let anyone
+      in by itself.
+    </p>
+    {{if .Me.IsOwner}}
+    <p class="muted small">
+      You are an owner. If you are the only owner and you forget your PIN, nobody
+      can reset it from the dashboard. On the shop PC itself, run
+      <code>fuelmind-setup reset-pin</code> as an administrator &mdash; physical access
+      to the machine is the last way back in, and it is meant to be.
+    </p>
+    {{end}}
+  </section>
+</div>
+{{end}}
+{{template "base" .}}

@@ -1,0 +1,204 @@
+{{define "body"}}
+<div class="page">
+  <h1>Data</h1>
+  <p class="muted">
+    FuelMind does not read your pumps directly. It reads what your POS or back-office
+    system exports, so this page is where you tell it where those exports land — and
+    where you can put a sale in yourself when the export is late or the POS is down.
+  </p>
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  {{if not .CanIngest}}
+  <div class="error">This build cannot accept data from the dashboard.</div>
+  {{end}}
+
+  <section>
+    <h2>Where your exports land</h2>
+    <p class="muted">
+      Point FuelMind at the folder your POS already writes to and you never have to copy a
+      file again. Each export is read once, then moved into a <code>processed</code> folder
+      beside it so you can always see what has been taken in.
+    </p>
+
+    {{if .Folders}}
+    <div class="table-wrap">
+    <table class="data">
+      <thead>
+        <tr><th>Folder</th><th>Name</th><th>Status</th><th class="num">Actions</th></tr>
+      </thead>
+      <tbody>
+        {{range .Folders}}
+        <tr>
+          <td><code>{{.Path}}</code></td>
+          <td>{{if .Label}}{{.Label}}{{else}}<span class="muted">&mdash;</span>{{end}}</td>
+          <td>
+            {{if not .Enabled}}<span class="muted">Switched off</span>
+            {{else if .LastError}}<span class="alert">Not reachable</span>
+            {{else if .Live}}<span class="ok">Watching</span>
+            {{else}}<span class="muted">Starting</span>{{end}}
+            {{if .LastError}}<div class="small muted">{{.LastError}}</div>{{end}}
+          </td>
+          <td class="num">
+            <form method="post" action="/data" class="inline">
+              <input type="hidden" name="action" value="folder_enabled">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <input type="hidden" name="enabled" value="{{if .Enabled}}off{{else}}on{{end}}">
+              <button type="submit">{{if .Enabled}}Switch off{{else}}Switch on{{end}}</button>
+            </form>
+            {{if not .BuiltIn}}
+            <form method="post" action="/data" class="inline">
+              <input type="hidden" name="action" value="remove_folder">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <button type="submit">Remove</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+    {{end}}
+
+    <form method="post" action="/data" class="ask">
+      <input type="hidden" name="action" value="add_folder">
+      <label for="path" class="sr-only">Folder path</label>
+      <input type="text" id="path" name="path" placeholder="C:\POS\exports" required size="36">
+      <label for="label" class="sr-only">What you call it</label>
+      <input type="text" id="label" name="label" placeholder="What you call it (optional)">
+      <button type="submit">Watch this folder</button>
+    </form>
+    <p class="muted small">
+      Give the full path, starting from the drive letter. FuelMind checks that the folder
+      exists and that it can write there before saving it, and tells you what is wrong if not.
+    </p>
+  </section>
+
+  <section>
+    <h2>Import a file now</h2>
+    <p class="muted">
+      For an export that is not in a watched folder — one on a USB stick, or sent to you by
+      email. It goes through exactly the same checks as a file that arrives on its own.
+    </p>
+    <form method="post" action="/data" enctype="multipart/form-data" class="ask">
+      <input type="hidden" name="action" value="upload">
+      <label for="export" class="sr-only">Export file</label>
+      <input type="file" id="export" name="export" accept=".csv,text/csv" required>
+      <button type="submit">Import</button>
+    </form>
+    <p class="muted small">
+      If some rows cannot be read, the good ones are still imported and the rest come back
+      to you as a file with a <code>fuelmind_error</code> column saying what was wrong.
+      Fix those rows and import that file.
+    </p>
+  </section>
+
+  <section>
+    <h2>Enter a sale by hand</h2>
+    <p class="muted">
+      For when the POS is down or a pump was written up in the day book. A sale entered
+      here is treated exactly like one from an export, so it counts towards revenue,
+      margin, credit and your score in the same way.
+    </p>
+    <form method="post" action="/data" class="entry-form">
+      <input type="hidden" name="action" value="manual_sale">
+
+      <div class="field">
+        <label for="date">Date</label>
+        <input type="date" id="date" name="date" value="{{.Today}}" required>
+      </div>
+      <div class="field">
+        <label for="time">Time</label>
+        <input type="time" id="time" name="time" value="{{.Now}}">
+      </div>
+      <div class="field">
+        <label for="product">Fuel</label>
+        <select id="product" name="product" required>
+          {{range .Products}}<option value="{{.}}">{{.}}</option>{{end}}
+        </select>
+      </div>
+      <div class="field">
+        <label for="liters">Litres</label>
+        <input type="text" id="liters" name="liters" inputmode="decimal" placeholder="12.5" required>
+      </div>
+      <div class="field">
+        <label for="unit_price">Price per litre</label>
+        <input type="text" id="unit_price" name="unit_price" inputmode="decimal" placeholder="275.50" required>
+      </div>
+      <div class="field">
+        <label for="total">Total charged</label>
+        <input type="text" id="total" name="total" inputmode="decimal" placeholder="Leave blank to work it out">
+      </div>
+      <div class="field">
+        <label for="payment_method">Paid by</label>
+        <select id="payment_method" name="payment_method">
+          <option value="CASH">Cash</option>
+          <option value="CARD">Card</option>
+          <option value="CREDIT">Credit (on account)</option>
+          <option value="MOBILE_WALLET">Mobile wallet</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="customer_phone">Customer phone</label>
+        <input type="text" id="customer_phone" name="customer_phone" placeholder="Needed for a credit sale">
+      </div>
+      <div class="field">
+        <label for="pump_id">Pump</label>
+        <input type="text" id="pump_id" name="pump_id" placeholder="Optional">
+      </div>
+      <div class="field">
+        <label for="attendant">Attendant</label>
+        <input type="text" id="attendant" name="attendant" placeholder="Optional">
+      </div>
+      <div class="field wide">
+        <label for="note">Note</label>
+        <input type="text" id="note" name="note" placeholder="Why this was entered by hand (optional)">
+      </div>
+      <div class="field actions">
+        <button type="submit">Record this sale</button>
+      </div>
+    </form>
+  </section>
+
+  <section>
+    <h2>What has arrived</h2>
+    {{if .LastIngest}}
+    <p class="muted">Last data in: <strong>{{.LastIngest}}</strong>.</p>
+    {{else}}
+    <p class="muted">Nothing has arrived yet. Drop an export into a watched folder, import a file, or enter a sale above.</p>
+    {{end}}
+
+    {{if .Events}}
+    <div class="table-wrap">
+    <table class="data">
+      <thead>
+        <tr>
+          <th>When</th><th>How</th><th>What</th>
+          <th class="num">Read</th><th class="num">Added</th><th class="num">Rejected</th>
+          <th>Result</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Events}}
+        <tr>
+          <td>{{.OccurredAt.Local.Format "2 Jan 15:04"}}</td>
+          <td>{{ingestSource .Source}}</td>
+          <td>
+            {{if .FileName}}{{.FileName}}{{else if .Origin}}{{.Origin}}{{else}}<span class="muted">&mdash;</span>{{end}}
+            {{if .Detail}}<div class="small muted">{{.Detail}}</div>{{end}}
+          </td>
+          <td class="num">{{.RowsRead}}</td>
+          <td class="num">{{.RowsInserted}}</td>
+          <td class="num">{{if .RowsRejected}}{{.RowsRejected}}{{else}}&mdash;{{end}}</td>
+          <td class="{{ingestClass .Outcome}}">{{ingestOutcome .Outcome}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+    {{end}}
+  </section>
+</div>
+{{end}}
+{{template "base" .}}

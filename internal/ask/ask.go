@@ -66,6 +66,14 @@ func (s *Service) Context(ctx context.Context) (llm.MartContext, error) {
 	if err != nil {
 		return llm.MartContext{}, fmt.Errorf("score: %w", err)
 	}
+	margin, err := s.store.RecentMargin(ctx, 7)
+	if err != nil {
+		return llm.MartContext{}, fmt.Errorf("margin: %w", err)
+	}
+	prices, err := s.store.PurchasePrices(ctx, 1)
+	if err != nil {
+		return llm.MartContext{}, fmt.Errorf("purchase prices: %w", err)
+	}
 
 	m := llm.MartContext{
 		Date:              today.Date,
@@ -92,6 +100,39 @@ func (s *Service) Context(ctx context.Context) (llm.MartContext, error) {
 		m.CreditOutstanding += c.OutstandingAmount
 		m.CreditCustomers++
 	}
+	// Fuel margin. Only days with a purchase price on record count
+	// towards it: a day with no cost would otherwise report the whole of
+	// its revenue as margin, which is the one answer that must never be
+	// given.
+	costedDays := map[string]bool{}
+	for _, row := range margin {
+		if !row.Costed {
+			continue
+		}
+		m.Margin7d += row.MarginAmount
+		m.Cost7d += row.CostOfGoods
+		// Revenue is accumulated only for the costed days, so the weekly
+		// margin answer never sets a full week of revenue against a
+		// partial week of cost.
+		m.Revenue7dCosted += row.Revenue
+		m.HaveCost7d = true
+		costedDays[row.Date] = true
+		if row.Date == today.Date {
+			m.MarginToday += row.MarginAmount
+			m.CostToday += row.CostOfGoods
+			m.HaveCostToday = true
+		}
+	}
+	m.CostedDays7d = len(costedDays)
+	if m.HaveCostToday && m.RevenueToday > 0 {
+		m.MarginPctToday = m.MarginToday / m.RevenueToday * 100
+	}
+	if len(prices) > 0 {
+		m.LatestCostPerLiter = prices[0].CostPerLiter
+		m.LatestCostProduct = prices[0].ProductCode
+		m.LatestCostFrom = prices[0].EffectiveDate
+	}
+
 	for _, issue := range parseIssueMessages(score.IssuesJSON) {
 		m.OpenIssues = append(m.OpenIssues, issue)
 	}

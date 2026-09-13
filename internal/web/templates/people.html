@@ -1,0 +1,142 @@
+{{define "body"}}
+<div class="page">
+  <h1>People</h1>
+  <p class="muted">
+    Give everyone who uses FuelMind their own sign-in. Then the Activity page can
+    say who entered a sale, who recorded a repayment and who changed a setting —
+    which a shared PIN can never tell you.
+  </p>
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  {{if .Requests}}
+  <section>
+    <h2>Waiting for you</h2>
+    <p class="muted">
+      These people say they cannot sign in. Setting a new PIN here signs them out
+      everywhere and lets them back in; tell them the new PIN in person, and ask
+      them to change it on their Account page.
+    </p>
+    {{range .Requests}}
+    <div class="request">
+      <div>
+        <strong>{{.Name}}</strong> <span class="muted">({{roleLabel .Role}})</span>
+        asked at {{.RequestedAt.Local.Format "2 Jan 15:04"}}
+        {{if .RemoteAddr}}<span class="muted small">from {{.RemoteAddr}}</span>{{end}}
+        {{if .Note}}<div class="small">&ldquo;{{.Note}}&rdquo;</div>{{end}}
+      </div>
+      <form method="post" action="/people" class="row-form">
+        <input type="hidden" name="action" value="reset_approve">
+        <input type="hidden" name="user_id" value="{{.UserID}}">
+        <label class="sr-only" for="rpin-{{.UserID}}">New PIN</label>
+        <input type="password" id="rpin-{{.UserID}}" name="pin" placeholder="New PIN" size="12" autocomplete="new-password" required>
+        <button type="submit">Give them this PIN</button>
+      </form>
+      <form method="post" action="/people" class="row-form">
+        <input type="hidden" name="action" value="reset_dismiss">
+        <input type="hidden" name="user_id" value="{{.UserID}}">
+        <button type="submit">Not them &mdash; dismiss</button>
+      </form>
+    </div>
+    {{end}}
+  </section>
+  {{end}}
+
+  <section>
+    <h2>Who can sign in</h2>
+    <div class="table-wrap">
+    <table class="data">
+      <thead>
+        <tr><th>Name</th><th>Sign-in name</th><th>Can do</th><th>Last signed in</th><th>Change</th></tr>
+      </thead>
+      <tbody>
+        {{range .People}}
+        <tr>
+          <td>
+            {{.Name}}
+            {{if eq .ID $.User.ID}}<span class="muted small">(you)</span>{{end}}
+            {{if not .IsActive}}<div class="small muted">Switched off</div>{{end}}
+            {{if not .PINSet}}<div class="small alert">No PIN set yet</div>{{end}}
+          </td>
+          <td><code>{{.Username}}</code></td>
+          <td>
+            {{if .IsOwner}}Everything, including settings and people
+            {{else}}Enter sales, record repayments, see the figures{{end}}
+          </td>
+          <td>
+            {{if .LastLoginAt.IsZero}}<span class="muted">Never</span>
+            {{else}}{{.LastLoginAt.Local.Format "2 Jan 15:04"}}{{end}}
+          </td>
+          <td>
+            <form method="post" action="/people" class="row-form">
+              <input type="hidden" name="action" value="update">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <label class="sr-only" for="name-{{.ID}}">Name</label>
+              <input type="text" id="name-{{.ID}}" name="display_name" value="{{.Name}}" size="12">
+              <label class="sr-only" for="role-{{.ID}}">Can do</label>
+              <select id="role-{{.ID}}" name="role">
+                <option value="owner" {{if .IsOwner}}selected{{end}}>Owner</option>
+                <option value="staff" {{if not .IsOwner}}selected{{end}}>Staff</option>
+              </select>
+              <label class="check">
+                <input type="checkbox" name="is_active" {{if .IsActive}}checked{{end}}> Can sign in
+              </label>
+              <button type="submit">Save</button>
+            </form>
+            <form method="post" action="/people" class="row-form">
+              <input type="hidden" name="action" value="pin">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <label class="sr-only" for="pin-{{.ID}}">New PIN</label>
+              <input type="password" id="pin-{{.ID}}" name="pin" placeholder="New PIN" size="10" autocomplete="new-password">
+              <button type="submit">Set PIN</button>
+            </form>
+            {{if ne .ID $.User.ID}}
+            <form method="post" action="/people" class="row-form">
+              <input type="hidden" name="action" value="remove">
+              <input type="hidden" name="id" value="{{.ID}}">
+              <button type="submit">Remove</button>
+            </form>
+            {{end}}
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    </div>
+    <p class="muted small">
+      Setting someone's PIN signs them out everywhere straight away. Removing
+      someone keeps everything they did in the Activity log.
+    </p>
+  </section>
+
+  <section>
+    <h2>Add someone</h2>
+    <form method="post" action="/people" class="entry-form">
+      <input type="hidden" name="action" value="add">
+      <div class="field">
+        <label for="new-name">Their name</label>
+        <input type="text" id="new-name" name="display_name" placeholder="Bilal" required>
+      </div>
+      <div class="field">
+        <label for="new-username">Sign-in name</label>
+        <input type="text" id="new-username" name="username" placeholder="bilal" required>
+      </div>
+      <div class="field">
+        <label for="new-role">Can do</label>
+        <select id="new-role" name="role">
+          <option value="staff">Staff — enter sales and repayments</option>
+          <option value="owner">Owner — everything, including settings</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="new-pin">Their first PIN</label>
+        <input type="password" id="new-pin" name="pin" placeholder="At least {{.MinPIN}} characters" autocomplete="new-password" required>
+      </div>
+      <div class="field actions">
+        <button type="submit">Add them</button>
+      </div>
+    </form>
+  </section>
+</div>
+{{end}}
+{{template "base" .}}

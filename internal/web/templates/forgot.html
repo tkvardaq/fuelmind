@@ -1,0 +1,40 @@
+{{define "body"}}
+<div class="auth">
+  <h1>Forgotten PIN</h1>
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  {{if not .Notice}}
+  <p class="muted">
+    Choose your name and FuelMind will tell the station owner. They can then set
+    you a new PIN. Nobody is signed in by doing this.
+  </p>
+  <form method="post" action="/forgot">
+    <div>
+      <label for="who" class="sr-only">Who are you?</label>
+      <select id="who" name="username" autofocus required>
+        <option value="">Choose your name</option>
+        {{range .People}}
+        <option value="{{.Username}}" {{if eq .Username $.Who}}selected{{end}}>{{.Name}}</option>
+        {{end}}
+      </select>
+    </div>
+    <div>
+      <label for="note" class="sr-only">Anything to tell the owner</label>
+      <input type="text" id="note" name="note" maxlength="200"
+             placeholder="Anything to add? (optional)">
+    </div>
+    <button type="submit">Tell the owner</button>
+  </form>
+  {{end}}
+
+  <p class="muted small">
+    <a href="/login">Back to sign in</a>
+  </p>
+  <p class="muted small">
+    Are you the only owner, with nobody who can reset it for you? On the shop PC,
+    run <code>fuelmind-setup reset-pin</code> as an administrator.
+  </p>
+</div>
+{{end}}
+{{template "base" .}}

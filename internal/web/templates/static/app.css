@@ -662,3 +662,132 @@ pre.msg {
 .badge.ok    { background: #dcfce7; color: #14532d; }
 .badge.warn  { background: #fef3c7; color: #78350f; }
 .badge.alert { background: #fde2e1; color: #8b1a13; }
+
+/* Data page: where the owner says where their data comes from, puts a
+   file in, or types a sale in. */
+form.ask { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin: 1rem 0; }
+form.ask input[type=text], form.ask input[type=file], form.ask select {
+  padding: 0.65rem 0.8rem;
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: var(--radius-sm);
+  min-height: 44px;
+}
+form.ask button {
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  padding: 0.65rem 1.1rem;
+  font: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-height: 44px;
+}
+
+/* One sale, typed in. A grid so it stays readable on a phone held at
+   the counter as well as on the shop PC. */
+.entry-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem 1rem;
+  margin: 1rem 0;
+  background: #fff;
+  padding: 1.1rem;
+  border-radius: var(--radius-md);
+  box-shadow: 0 1px 2px var(--color-shadow);
+}
+.entry-form .field { display: flex; flex-direction: column; gap: 0.3rem; }
+.entry-form .field.wide { grid-column: 1 / -1; }
+.entry-form .field.actions { grid-column: 1 / -1; align-items: flex-start; }
+.entry-form label { font-size: 0.85rem; color: var(--color-muted); }
+.entry-form input, .entry-form select {
+  padding: 0.6rem 0.7rem;
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: var(--radius-sm);
+  min-height: 44px;
+}
+.entry-form button {
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  padding: 0.7rem 1.4rem;
+  font: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-height: 44px;
+}
+.entry-form input:focus-visible,
+.entry-form select:focus-visible,
+.entry-form button:focus-visible,
+form.ask input:focus-visible,
+form.ask select:focus-visible,
+form.ask button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Status words in the "what has arrived" table. */
+.ok    { color: #14532d; }
+.warn  { color: #78350f; }
+.alert { color: #991b1b; }
+td.ok, td.warn, td.alert { font-weight: 600; }
+.small { font-size: 0.85rem; }
+
+/* People page: one row per person, each with its own small forms. */
+.row-form {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+.row-form input[type=text],
+.row-form input[type=password],
+.row-form select {
+  padding: 0.45rem 0.5rem;
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: var(--radius-sm);
+  min-height: 38px;
+}
+.row-form button {
+  background: var(--color-primary);
+  color: #fff;
+  border: none;
+  padding: 0.45rem 0.8rem;
+  font: inherit;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  min-height: 38px;
+}
+.row-form .check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+.row-form input:focus-visible,
+.row-form select:focus-visible,
+.row-form button:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* The login page's "who are you?" picker. */
+.auth select {
+  width: 100%;
+  padding: 0.65rem 0.8rem;
+  font: inherit;
+  border: 1px solid #ccc;
+  border-radius: var(--radius-sm);
+  min-height: 44px;
+  margin-bottom: 0.5rem;
+}
+
+/* An answer can be several lines — the help list, or a refusal followed
+   by what can be asked instead. Keep the line breaks the answer was
+   written with. */
+.answer p { white-space: pre-line; }

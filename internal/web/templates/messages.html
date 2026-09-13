@@ -35,6 +35,31 @@
   </section>
 
   <section>
+    <h2>Asking the station a question</h2>
+    <p class="muted">
+      Message the station's own WhatsApp from the number below and it answers from
+      this PC &mdash; today's sales, credit, margin, the score. Send <strong>help</strong>
+      to see the list. Nothing is opened to the internet and no other service is
+      involved: the station is already connected to WhatsApp to send you the evening
+      summary, and it listens on the same connection.
+    </p>
+    <p class="muted small">
+      Only the number in <em>Send to</em> below is answered. A message from any other
+      number is ignored, and you can see every question that was asked at the bottom
+      of this page.
+    </p>
+    <form method="post" action="/messages" class="ask">
+      <input type="hidden" name="action" value="answer_questions">
+      <input type="hidden" name="answer_questions" value="{{if .AnswersQuestions}}off{{else}}on{{end}}">
+      <button type="submit">{{if .AnswersQuestions}}Stop answering{{else}}Start answering{{end}}</button>
+      <span class="muted">
+        Currently <strong>{{if .AnswersQuestions}}answering{{else}}not answering{{end}}</strong>
+        {{if not .Paired}}&middot; link a phone first{{end}}
+      </span>
+    </form>
+  </section>
+
+  <section>
     <h2>What to send</h2>
     <form method="post" action="/messages" class="stack">
       <input type="hidden" name="action" value="save">

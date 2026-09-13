@@ -1,16 +1,34 @@
 {{define "body"}}
 <div class="auth">
   <h1>FuelMind</h1>
+  {{if .Multi}}
+  <p class="muted">Choose your name and enter your PIN.</p>
+  {{else}}
   <p class="muted">Enter your PIN to continue.</p>
+  {{end}}
+  {{if .Notice}}<div class="notice" role="status">{{.Notice}}</div>{{end}}
   {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
   <form method="post" action="/login">
+    {{if .Multi}}
+    <div>
+      <label for="who" class="sr-only">Who are you?</label>
+      <select id="who" name="username" autofocus>
+        {{range .People}}
+        <option value="{{.Username}}" {{if eq .Username $.Who}}selected{{end}}>{{.Name}}</option>
+        {{end}}
+      </select>
+    </div>
+    {{else if .People}}
+      {{range .People}}<input type="hidden" name="username" value="{{.Username}}">{{end}}
+    {{end}}
     <div>
       <label for="pin-input" class="sr-only">PIN</label>
-      <input type="password" id="pin-input" name="pin" autofocus autocomplete="current-password" placeholder="PIN" required>
+      <input type="password" id="pin-input" name="pin" {{if not .Multi}}autofocus{{end}}
+             autocomplete="current-password" placeholder="PIN" required>
     </div>
     <button type="submit">Log in</button>
   </form>
-  <p class="muted small">Forgot the PIN? On the shop PC, run <code>fuelmind-setup reset-pin</code> as administrator.</p>
+  <p class="muted small"><a href="/forgot">I've forgotten my PIN</a></p>
 </div>
 {{end}}
 {{template "base" .}}

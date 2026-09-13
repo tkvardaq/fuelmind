@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,4 +341,66 @@ func findRepoFile(t *testing.T, rel string) string {
 	}
 	t.Fatalf("findRepoFile: %q not found (tried %v)", rel, candidates)
 	return ""
+}
+
+// A file where most rows are fine and one is not must not cost the
+// station the rest of the day's sales. The good rows are ingested, the
+// bad row is written to failed/<name>.rejected.csv for correction, and
+// the original is archived as processed.
+func TestE2EPartialFileKeepsGoodRows(t *testing.T) {
+	posDrop := filepath.Join(t.TempDir(), "pos_drop")
+	if err := os.MkdirAll(posDrop, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newTestStorage(t)
+	w, _ := newTestWatcher(t, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	_ = w.Start(ctx, posDrop)
+
+	// Three good rows, one with an unreadable timestamp.
+	csvData := []byte(`pos_source_id,external_id,occurred_at,product_alias,quantity_liters,unit_price,total_amount,payment_method
+lane_1,TX-001,2026-09-07T08:00:00Z,HSD,10,275.50,2755.00,CASH
+lane_1,TX-002,NOT-A-DATE,HSD,10,275.50,2755.00,CASH
+lane_1,TX-003,2026-09-07T08:02:00Z,HSD,10,275.50,2755.00,CASH
+lane_1,TX-004,2026-09-07T08:03:00Z,HSD,10,275.50,2755.00,CASH
+`)
+	if err := os.WriteFile(filepath.Join(posDrop, "day.csv"), csvData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the archive, not for the rows: the rows are written first
+	// and the file is moved last, so waiting on the row count would race
+	// the rest of processFile.
+	processed := filepath.Join(posDrop, "processed", "day.csv")
+	waitFor(t, 5*time.Second, func() bool {
+		_, err := os.Stat(processed)
+		return err == nil
+	})
+
+	var count int
+	if err := store.DB().QueryRow(`SELECT COUNT(*) FROM raw_pos_transactions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Errorf("ingested %d rows, want 3 (the good rows must survive one bad row)", count)
+	}
+
+	// The bad row is written out on its own, with the reason.
+	rejects := filepath.Join(posDrop, "failed", "day.rejected.csv")
+	data, err := os.ReadFile(rejects)
+	if err != nil {
+		t.Fatalf("expected a rejects file at %s: %v", rejects, err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "TX-002") {
+		t.Errorf("rejects file should carry the bad row TX-002, got:\n%s", text)
+	}
+	if !strings.Contains(text, "fuelmind_error") {
+		t.Errorf("rejects file should have a fuelmind_error column, got:\n%s", text)
+	}
+	if strings.Contains(text, "TX-001") {
+		t.Errorf("rejects file should carry only the bad row, got:\n%s", text)
+	}
 }

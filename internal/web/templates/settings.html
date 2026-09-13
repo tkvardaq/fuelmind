@@ -37,6 +37,67 @@
   </section>
 
   <section>
+    <h2>Answering questions in your own words</h2>
+    <p class="muted">
+      FuelMind always answers a set list of questions — today's sales, this week,
+      credit, margin, the score — with no model and no network. This is only for
+      questions asked in your own words, like "why were takings down yesterday?".
+    </p>
+
+    <form method="post" action="/settings" class="entry-form">
+      <input type="hidden" name="action" value="model">
+
+      <div class="field wide">
+        <label for="provider">Where answers come from</label>
+        <select id="provider" name="provider">
+          {{range .Providers}}
+          <option value="{{.Value}}" {{if .Selected}}selected{{end}}>{{.Label}}</option>
+          {{end}}
+        </select>
+        {{range .Providers}}{{if .Selected}}<p class="muted small">{{.Description}}</p>{{end}}{{end}}
+      </div>
+
+      <div class="field">
+        <label for="model">Model</label>
+        <input type="text" id="model" name="model" value="{{.Model.Model}}" placeholder="Leave blank for the default">
+      </div>
+      <div class="field">
+        <label for="api_key">API key</label>
+        <input type="password" id="api_key" name="api_key" autocomplete="off"
+               placeholder="{{if .ModelKey}}{{.ModelKey}}{{else}}Needed for a hosted provider{{end}}">
+        {{if .ModelKey}}<span class="muted small">A key is saved. Leave this blank to keep it.</span>{{end}}
+      </div>
+      <div class="field wide">
+        <label for="base_url">Address (optional)</label>
+        <input type="text" id="base_url" name="base_url" value="{{.Model.BaseURL}}"
+               placeholder="Only if you use a different host, e.g. https://api.groq.com/openai/v1">
+      </div>
+      <div class="field actions">
+        <button type="submit">Save</button>
+      </div>
+    </form>
+
+    <form method="post" action="/settings" class="ask">
+      <input type="hidden" name="action" value="model_test">
+      <button type="submit">Test the connection</button>
+      <span class="muted">
+        Currently <strong>{{.Model.Provider.Label}}</strong>{{if .Model.Model}} &middot; {{.Model.Model}}{{end}}.
+        Saving does not check it works &mdash; press Test for that.
+      </span>
+    </form>
+
+    {{if .OffSite}}
+    <p class="muted small">
+      <strong>What gets sent:</strong> when you ask a question in your own words, that
+      question and the figures needed to answer it (today's revenue, litres, credit
+      total, margin) are sent to the provider. Customer phone numbers and individual
+      transactions are never sent. The set questions are still answered here, with
+      nothing leaving the shop.
+    </p>
+    {{end}}
+  </section>
+
+  <section>
     <h2>Ask from your phone</h2>
     {{if .CloudOn}}
     <p class="muted">

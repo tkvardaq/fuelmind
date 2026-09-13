@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,31 @@ type MartContext struct {
 	OverallScore      int
 	ScoreDate         string
 	OpenIssues        []string
+
+	// Margin is fuel margin: revenue minus what that fuel cost, which
+	// FuelMind can only work out for days the owner has recorded a
+	// purchase price for. HaveCostToday says whether today is one of
+	// them, so an answer can say "no purchase price recorded yet"
+	// instead of quietly reporting all of revenue as profit.
+	MarginToday    float64
+	MarginPctToday float64
+	CostToday      float64
+	HaveCostToday  bool
+	Margin7d       float64
+	Cost7d         float64
+	// Revenue7dCosted is the revenue of only those days a cost is known
+	// for, and CostedDays7d is how many days that is. Comparing a week
+	// of revenue against one day of cost would report a margin that is
+	// simply wrong, so the answer quotes matching figures and says how
+	// much of the week they cover.
+	Revenue7dCosted float64
+	CostedDays7d    int
+	HaveCost7d      bool
+	// LatestCostPerLiter is the most recent purchase price on record,
+	// with the product it applies to and the day it took effect.
+	LatestCostPerLiter float64
+	LatestCostProduct  string
+	LatestCostFrom     string
 }
 
 // ProductRow is one product's figures for today.
@@ -49,12 +75,17 @@ type ProductRow struct {
 }
 
 // Router answers owner questions. Deterministic paths are tried first;
-// the LLM is only used on Standard+ tiers for open-ended questions.
+// a model is only used for open-ended ones, and only when one is
+// configured.
 type Router struct {
 	Client  Client
 	Tier    Tier
 	Model   string
 	Timeout time.Duration
+
+	// mu guards the fields above so the owner can change the model
+	// settings from the dashboard while questions are being answered.
+	mu sync.RWMutex
 }
 
 // NewRouter builds a Router. With no model for the tier (Basic) only the
@@ -66,19 +97,93 @@ func NewRouter(client Client, tier Tier) *Router {
 	return &Router{Client: client, Tier: tier, Model: ModelForTier(tier), Timeout: 20 * time.Second}
 }
 
+// NewRouterFromSettings builds a Router for the station's saved model
+// settings. A Settings with no usable model gives a Router that answers
+// the set questions and says plainly that it cannot do more.
+func NewRouterFromSettings(s Settings, tier Tier) *Router {
+	timeout := s.Timeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	return &Router{Client: NewClient(s), Tier: tier, Model: s.Model, Timeout: timeout}
+}
+
+// Configure swaps in new model settings. It is safe to call while
+// questions are being answered, so changing the provider in Settings
+// takes effect on the next question rather than after a restart.
+func (r *Router) Configure(s Settings) {
+	timeout := s.Timeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	client := NewClient(s)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Client, r.Model, r.Timeout = client, s.Model, timeout
+}
+
+// current reads the model settings under the lock.
+func (r *Router) current() (Client, string, time.Duration) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.Client, r.Model, r.Timeout
+}
+
+// HasModel reports whether an open-ended question can be answered at
+// all, so the dashboard can say so before the owner types one.
+func (r *Router) HasModel() bool {
+	client, model, _ := r.current()
+	return client != nil && model != ""
+}
+
 var (
-	reCredit        = regexp.MustCompile(`(?i)\b(udhaar|udhar|outstanding|owes?|owed|dues?|receivables?)\b|\bcredit\b(?:\s+(?:sales?|customers?|balance))?`)
-	reCreditDevice  = regexp.MustCompile(`(?i)\bcredit\s*(card|machine|terminal)\b`)
-	reScore         = regexp.MustCompile(`(?i)\b(fuelmind\s+score|health\s+score|score)\b`)
-	reSales         = regexp.MustCompile(`(?i)\b(revenue|sales?|sold|sell|earn(?:ed|ing|ings)?|make|made|income|takings?|liters?|litres?|volume|transactions?)\b`)
-	reYesterday     = regexp.MustCompile(`(?i)\byesterday\b`)
-	reWeek          = regexp.MustCompile(`(?i)\b(this week|past week|last 7 days|past 7 days|7 days)\b`)
-	reOtherPeriod   = regexp.MustCompile(`(?i)\b(last week|month|year|monthly|yearly|quarter|\d{4}-\d{2}-\d{2}|last \d+ days|january|february|march|april|may|june|july|august|september|october|november|december)\b`)
-	reProduct       = regexp.MustCompile(`(?i)\b(diesel|hsd|petrol\s*9[25]|pmg|p-?9[25]|super|high octane)\b`)
-	reUnanswerables = regexp.MustCompile(`(?i)\b(price|rate|tank|stock|inventory|dip|cash in|drawer|profit|margin|cost|expense|salary|staff|attendant|shift)\b`)
+	reCredit       = regexp.MustCompile(`(?i)\b(udhaar|udhar|outstanding|owes?|owed|dues?|receivables?)\b|\bcredit\b(?:\s+(?:sales?|customers?|balance))?`)
+	reCreditDevice = regexp.MustCompile(`(?i)\bcredit\s*(card|machine|terminal)\b`)
+	reScore        = regexp.MustCompile(`(?i)\b(fuelmind\s+score|health\s+score|score)\b`)
+	reSales        = regexp.MustCompile(`(?i)\b(revenue|sales?|sold|sell|earn(?:ed|ing|ings)?|make|made|income|takings?|liters?|litres?|volume|transactions?)\b`)
+	reYesterday    = regexp.MustCompile(`(?i)\byesterday\b`)
+	reWeek         = regexp.MustCompile(`(?i)\b(this week|past week|last 7 days|past 7 days|7 days)\b`)
+	reOtherPeriod  = regexp.MustCompile(`(?i)\b(last week|month|year|monthly|yearly|quarter|\d{4}-\d{2}-\d{2}|last \d+ days|january|february|march|april|may|june|july|august|september|october|november|december)\b`)
+	reProduct      = regexp.MustCompile(`(?i)\b(diesel|hsd|petrol\s*9[25]|pmg|p-?9[25]|super|high octane)\b`)
+	reMargin       = regexp.MustCompile(`(?i)\b(margin|profit|profitable|markup|mark-up)\b`)
+	// Things FuelMind genuinely has no feed for in v1. Margin used to
+	// be on this list; it is answerable now that the owner can record
+	// what they pay per litre, so it moved to reMargin above.
+	reUnanswerables = regexp.MustCompile(`(?i)\b(tank|stock|inventory|dip|cash in|drawer|expense|salary|staff|attendant|shift)\b`)
+	rePurchasePrice = regexp.MustCompile(
+		`(?i)\b(purchase price|buying price|(?:cost|rate|price)\s+per\s+(?:litre|liter)|` +
+			`(?:pay|paid|buy|bought)\b[^?.]{0,20}\bper\s+(?:litre|liter)|rate we (?:buy|pay))`)
+	// A bare "?" is a help request, but it is not a word, so it cannot
+	// carry a \b boundary like the rest of the alternation.
+	reHelp = regexp.MustCompile(`(?i)^\s*(?:\?+\s*$|(?:help|what can (?:you|i) (?:do|ask)|commands?|menu|options)\b)`)
+	// A question asking *why* something happened, or for a comparison or
+	// an explanation, wants reasoning rather than a figure. Handing back
+	// "today's revenue is X" to "why did takings drop?" answers a
+	// question nobody asked, so these skip the deterministic answers and
+	// go to the model — which, if there isn't one, says so plainly.
+	reExplain = regexp.MustCompile(`(?i)\b(why|how come|reason|explain|compare|trend|better or worse|should i|what if|forecast|predict)\b`)
 )
 
-const helpText = "I can answer: today's, yesterday's and the last 7 days' sales, today's sales by product, total credit outstanding, and the FuelMind Score. See the Sales and Credit pages for more."
+// helpText lists what can actually be answered. An owner who asks
+// something outside it should be told what is inside it, not left
+// guessing — "I don't have that data" on its own teaches nothing and is
+// the main reason the Ask box feels broken.
+const helpText = `Here is what I can tell you:
+
+• "how much did we sell today?" — revenue, litres and number of sales
+• "what did we sell yesterday?"
+• "sales this week" — the last 7 days
+• "how much diesel today?" — or petrol 92 / petrol 95
+• "what is our margin today?" — needs a purchase price in Settings
+• "how much credit is outstanding?"
+• "what is our score?"
+
+I only have figures from the sales data that has come in. For tanks,
+shifts, wages or expenses there is no feed yet.`
+
+// shortHelp is the one-line version, for appending to a refusal.
+const shortHelp = `Send "help" to see what I can answer.`
 
 // Route dispatches a question. It returns the answer, the path taken
 // ("noop", "standard", "canned", "llm", "llm-fail", "llm-rejected") and
@@ -89,13 +194,49 @@ func (r *Router) Route(ctx context.Context, question string, m MartContext) (ans
 		return "Please type a question about your station, for example: How much did we sell today?", "noop", nil
 	}
 
+	if reHelp.MatchString(q) {
+		return helpText, "help", nil
+	}
+
 	creditQ := reCredit.MatchString(q) && !reCreditDevice.MatchString(q)
 	salesQ := reSales.MatchString(q) || reProduct.MatchString(q)
 	unanswerable := reUnanswerables.MatchString(q)
+	// An explanation is never one of the fixed answers, so skip straight
+	// to the model rather than replying with a figure that does not
+	// answer what was asked.
+	explain := reExplain.MatchString(q)
 
 	switch {
+	case explain:
+		// handled below, by the model
 	case unanswerable:
-		// Prices, stock, profit, cash: no data feed in v1. Never guess.
+		// Tanks, shifts, expenses: no data feed in v1. Never guess.
+	case rePurchasePrice.MatchString(q):
+		if m.LatestCostProduct == "" {
+			return "No purchase price has been recorded yet. Enter what you pay per litre in Settings and I can work out your margin.", "standard", nil
+		}
+		return fmt.Sprintf("The latest purchase price on record is %s per litre for %s, from %s.",
+			pkr(m.LatestCostPerLiter), displayProduct(m.LatestCostProduct), m.LatestCostFrom), "standard", nil
+	case reMargin.MatchString(q) && reWeek.MatchString(q):
+		if !m.HaveCost7d {
+			return "I cannot work out margin for the last 7 days: no purchase price is recorded for those days. Enter what you pay per litre in Settings.", "standard", nil
+		}
+		// Only the days a cost is known for. Quoting the whole week's
+		// revenue against part of a week's cost would overstate margin
+		// badly, which is the one mistake this must not make.
+		coverage := fmt.Sprintf("the %d of the last 7 days that have a purchase price recorded", m.CostedDays7d)
+		if m.CostedDays7d == 1 {
+			coverage = "the 1 day of the last 7 that has a purchase price recorded"
+		}
+		return fmt.Sprintf(
+			"Over %s: %s revenue, %s fuel cost, %s margin. That is fuel margin only — it does not include wages, rent or other costs.",
+			coverage, pkr(m.Revenue7dCosted), pkr(m.Cost7d), pkr(m.Margin7d)), "standard", nil
+	case reMargin.MatchString(q):
+		if !m.HaveCostToday {
+			return "I cannot work out today's margin: no purchase price is recorded for today. Enter what you pay per litre in Settings and this answers itself.", "standard", nil
+		}
+		return fmt.Sprintf("Today: %s revenue, %s fuel cost, %s margin (%s%%). That is fuel margin only — it does not include wages, rent or other costs.",
+			pkr(m.RevenueToday), pkr(m.CostToday), pkr(m.MarginToday), commas(m.MarginPctToday, 1)), "standard", nil
 	case salesQ && reWeek.MatchString(q):
 		return fmt.Sprintf("Over the last 7 days: %s revenue on %s.", pkr(m.Revenue7d), liters(m.Volume7d)), "standard", nil
 	case reOtherPeriod.MatchString(q) && (salesQ || creditQ):
@@ -125,21 +266,31 @@ func (r *Router) Route(ctx context.Context, question string, m MartContext) (ans
 		return fmt.Sprintf("Today's revenue is %s from %d sale(s), %s sold.", pkr(m.RevenueToday), m.TransactionsToday, liters(m.VolumeTodayLiters)), "standard", nil
 	}
 
-	// Open-ended question.
-	if r.Tier == TierBasic || r.Model == "" {
-		return "I don't have that data. " + helpText, "canned", nil
+	// Open-ended question. Anything past this point needs a model, and
+	// most stations do not have one: telling the owner that plainly is
+	// far better than an unexplained "I don't have that data", which is
+	// what made the Ask box feel broken.
+	if unanswerable {
+		return "I don't have a feed for that yet — FuelMind only sees the sales data that comes in from your POS.\n\n" + helpText, "no-feed", nil
 	}
+	client, model, timeout := r.current()
+	if client == nil || model == "" {
+		return "I can only answer set questions on this station, because no AI model is connected.\n\n" +
+			helpText + "\n\nTo answer questions in your own words, connect a model in Settings.", "canned", nil
+	}
+
 	prompt := buildPrompt(q, m)
-	lctx, cancel := context.WithTimeout(ctx, r.Timeout)
+	lctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	reply, lerr := r.Client.Generate(lctx, r.Model, prompt)
+	reply, lerr := client.Generate(lctx, model, prompt)
 	if lerr != nil {
-		return "I don't have that data. " + helpText, "llm-fail", lerr
+		return "I could not reach the AI model just now, so I can only answer set questions.\n\n" + helpText, "llm-fail", lerr
 	}
 	if bad := ungroundedNumbers(reply, m); len(bad) > 0 {
-		// The model produced a number that is not in its context:
-		// never show it (spec §4 hard rule, plan risk R6).
-		return "I don't have that data. " + helpText, "llm-rejected", nil
+		// The model produced a number it was not given: never show it
+		// (spec §4 hard rule, plan risk R6). Say so rather than pretend
+		// there is no data — the data is there, the answer was not safe.
+		return "I could not give you a reliable answer to that one.\n\n" + helpText, "llm-rejected", nil
 	}
 	return reply, "llm", nil
 }
@@ -221,6 +372,9 @@ func allowedNumbers(c MartContext) map[string]bool {
 		c.RevenueToday, c.RevenueYesterday, c.VolumeTodayLiters, c.Volume7d, c.Revenue7d,
 		c.CreditOutstanding, float64(c.CreditCustomers), float64(c.TransactionsToday),
 		float64(c.OverallScore), float64(len(c.OpenIssues)),
+		c.MarginToday, c.MarginPctToday, c.CostToday,
+		c.Margin7d, c.Cost7d, c.Revenue7dCosted,
+		float64(c.CostedDays7d), c.LatestCostPerLiter,
 	} {
 		add(v)
 	}
@@ -302,6 +456,21 @@ func buildPrompt(q string, c MartContext) string {
 	fmt.Fprintf(&b, "- Volume today: %.2f liters\n", c.VolumeTodayLiters)
 	fmt.Fprintf(&b, "- Last 7 days: %.2f PKR revenue, %.2f liters\n", c.Revenue7d, c.Volume7d)
 	fmt.Fprintf(&b, "- Credit outstanding: %.2f PKR across %d customers\n", c.CreditOutstanding, c.CreditCustomers)
+	if c.HaveCostToday {
+		fmt.Fprintf(&b, "- Fuel margin today: %.2f PKR on %.2f PKR of fuel cost (%.1f%%)\n",
+			c.MarginToday, c.CostToday, c.MarginPctToday)
+	} else {
+		b.WriteString("- Fuel margin today: not known (the owner has not recorded a purchase price for today)\n")
+	}
+	if c.HaveCost7d {
+		fmt.Fprintf(&b,
+			"- Fuel margin over the %d of the last 7 days that have a cost recorded: %.2f PKR margin on %.2f PKR revenue and %.2f PKR fuel cost\n",
+			c.CostedDays7d, c.Margin7d, c.Revenue7dCosted, c.Cost7d)
+	}
+	if c.LatestCostProduct != "" {
+		fmt.Fprintf(&b, "- Latest purchase price: %.2f PKR per litre for %s, from %s\n",
+			c.LatestCostPerLiter, c.LatestCostProduct, c.LatestCostFrom)
+	}
 	fmt.Fprintf(&b, "- FuelMind Score (%s): %d/100\n", c.ScoreDate, c.OverallScore)
 	if len(c.TopProducts) > 0 {
 		b.WriteString("- Products today:\n")

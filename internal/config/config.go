@@ -34,6 +34,11 @@ type Config struct {
 	Supervised bool
 	// UpdateAnytime disables the 02:00-05:00 maintenance window.
 	UpdateAnytime bool
+	// UpdateInterval is how often the station asks whether a new version
+	// is available. Zero means the update agent's own default (30m).
+	// It exists so support can watch an update happen on a station that
+	// is misbehaving, instead of waiting half an hour per attempt.
+	UpdateInterval time.Duration
 }
 
 // Load reads configuration from environment variables and defaults:
@@ -47,6 +52,7 @@ type Config struct {
 //	FUELMIND_HARDWARE_TIER  basic|standard|enhanced|pro (default: detected)
 //	FUELMIND_OLLAMA_URL     local LLM endpoint (default http://127.0.0.1:11434)
 //	FUELMIND_UPDATE_WINDOW  "any" applies updates immediately
+//	FUELMIND_UPDATE_INTERVAL how often to check for a new version (1m..24h)
 //	FUELMIND_SUPERVISED     set to 1 by the launcher
 func Load() (*Config, error) {
 	dataDir := os.Getenv("FUELMIND_DATA_DIR")
@@ -102,20 +108,33 @@ func Load() (*Config, error) {
 		ollama = "http://127.0.0.1:11434"
 	}
 
+	var updateInterval time.Duration
+	if v := os.Getenv("FUELMIND_UPDATE_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return nil, fmt.Errorf("config: FUELMIND_UPDATE_INTERVAL %q is not a valid duration: %w", v, err)
+		}
+		if d < time.Minute || d > 24*time.Hour {
+			return nil, fmt.Errorf("config: FUELMIND_UPDATE_INTERVAL %q out of range [1m, 24h]", v)
+		}
+		updateInterval = d
+	}
+
 	cloudURL := strings.TrimRight(os.Getenv("FUELMIND_CLOUD_URL"), "/")
 	return &Config{
-		Path:          filepath.Join(dataDir, "fuelmind.db"),
-		DataDir:       dataDir,
-		LogLevel:      lvl,
-		Port:          port,
-		Bind:          bind,
-		CloudURL:      cloudURL,
-		SyncCycle:     syncCycle,
-		SyncEnabled:   cloudURL != "",
-		HardwareTier:  tier,
-		OllamaURL:     ollama,
-		Supervised:    os.Getenv("FUELMIND_SUPERVISED") == "1",
-		UpdateAnytime: strings.EqualFold(os.Getenv("FUELMIND_UPDATE_WINDOW"), "any"),
+		Path:           filepath.Join(dataDir, "fuelmind.db"),
+		DataDir:        dataDir,
+		LogLevel:       lvl,
+		Port:           port,
+		Bind:           bind,
+		CloudURL:       cloudURL,
+		SyncCycle:      syncCycle,
+		SyncEnabled:    cloudURL != "",
+		HardwareTier:   tier,
+		OllamaURL:      ollama,
+		Supervised:     os.Getenv("FUELMIND_SUPERVISED") == "1",
+		UpdateAnytime:  strings.EqualFold(os.Getenv("FUELMIND_UPDATE_WINDOW"), "any"),
+		UpdateInterval: updateInterval,
 	}, nil
 }
 

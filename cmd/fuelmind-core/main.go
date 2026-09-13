@@ -117,6 +117,24 @@ func run(rebuildMartOnly bool) (int, error) {
 		logger.Warn("could not persist hardware_tier", "err", err)
 	}
 
+	// One-time: rewrite customer phones recorded before FuelMind had a
+	// canonical form, so a customer written three ways is one account.
+	phonesRekeyed := 0
+	if store.LocalConfigValue(ctx, storage.ConfigKeyPhonesCanonical, "") != "done" {
+		n, err := store.CanonicalizeCustomerPhones(ctx)
+		if err != nil {
+			logger.Warn("could not canonicalize customer phones", "err", err)
+		} else {
+			phonesRekeyed = n
+			if n > 0 {
+				logger.Info("customer phone numbers put into one form", "rows_rewritten", n)
+			}
+			if err := store.SetLocalConfig(ctx, storage.ConfigKeyPhonesCanonical, "done", "", false); err != nil {
+				logger.Warn("could not record the phone backfill", "err", err)
+			}
+		}
+	}
+
 	posDrop := filepath.Join(cfg.DataDir, "pos_drop")
 	if err := os.MkdirAll(posDrop, 0o755); err != nil {
 		return 1, fmt.Errorf("mkdir pos_drop: %w", err)
@@ -151,7 +169,7 @@ func run(rebuildMartOnly bool) (int, error) {
 	} else if errs > 0 {
 		logger.Warn("startup normalize: some rows could not be read", "rows", errs)
 	}
-	if applied > 0 {
+	if applied > 0 || phonesRekeyed > 0 {
 		if err := m.MaterializeAll(ctx); err != nil {
 			logger.Warn("post-migration mart rebuild", "err", err)
 		}
@@ -166,11 +184,26 @@ func run(rebuildMartOnly bool) (int, error) {
 		return 1, fmt.Errorf("csvwatch.NewWatcher: %w", err)
 	}
 	defer watcher.Close()
-	go periodicRefresh(ctx, watcher, norm, m, posDrop, logger)
+	// Everything that arrives is recorded, so the Data page can answer
+	// "did my sales actually come in?" without reading a log file.
+	watcher.SetRecorder(web.IngestRecorder{Store: store, Logger: logger})
+	go periodicRefresh(ctx, watcher, norm, m, logger)
 
-	// One answering service for every channel: the dashboard Ask box and
-	// the cloud relay both use it, so they cannot drift apart.
-	answerer := ask.New(store, llm.NewRouter(llm.NewHTTPClient(cfg.OllamaURL), llm.Tier(hwTier)))
+	// One answering service for every channel: the dashboard Ask box, the
+	// station's own WhatsApp and the cloud relay all use it, so they
+	// cannot drift apart.
+	//
+	// Where the answers come from is the owner's choice, saved in the
+	// station database: the fixed answers only, a model on this PC, or a
+	// hosted API with a key. It is read here and can be changed from
+	// Settings without a restart.
+	modelSettings := llm.LoadSettings(ctx, store, cfg.OllamaURL, llm.Tier(hwTier))
+	router := llm.NewRouterFromSettings(modelSettings, llm.Tier(hwTier))
+	answerer := ask.New(store, router)
+	logger.Info("answering questions",
+		slog.String("provider", string(modelSettings.Provider)),
+		slog.String("model", modelSettings.Model),
+		slog.Bool("open_ended", router.HasModel()))
 
 	identity, err := loadOrCreateIdentity(ctx, store, logger)
 	if err != nil {
@@ -208,6 +241,7 @@ func run(rebuildMartOnly bool) (int, error) {
 			BaseDir:      cfg.DataDir,
 			Supervised:   cfg.Supervised,
 			Window:       window,
+			Interval:     cfg.UpdateInterval,
 			HardwareTier: hwTier,
 			HTTPClient:   &http.Client{},
 			LicenseTier:  func(c context.Context) string { return sync.LicenseTier(c, store) },
@@ -260,13 +294,19 @@ func run(rebuildMartOnly bool) (int, error) {
 	if pairer != nil {
 		srv.Pairing = pairer
 	}
+	srv.Ingest = watcher
+	srv.Model = router
 
 	// Start the watcher before the dashboard blocks, so exports dropped
-	// while the service was down are picked up immediately.
-	if err := watcher.Start(ctx, posDrop); err != nil {
-		return 1, fmt.Errorf("pos watcher: %w", err)
+	// while the service was down are picked up immediately. The owner can
+	// point FuelMind at the folder their POS already writes to, so what
+	// is watched comes from the database, not from a fixed path. The
+	// built-in drop folder is always registered as a fallback.
+	if err := store.EnsureBuiltInWatchFolder(ctx, posDrop); err != nil {
+		logger.Warn("could not register the built-in drop folder", "folder", posDrop, "err", err)
 	}
-	logger.Info("pos watcher started", slog.String("folder", posDrop))
+	srv.ApplyWatchFolders(ctx)
+	logger.Info("pos watcher started", slog.Any("folders", watcher.Folders()))
 
 	if err := srv.ListenAndServe(ctx); err != nil {
 		return 1, fmt.Errorf("dashboard: %w", err)
@@ -282,7 +322,7 @@ func run(rebuildMartOnly bool) (int, error) {
 // periodicRefresh re-runs normalization and materialization on a timer and
 // sweeps the drop folder, so nothing depends on a file-system event
 // arriving (spec §3.3).
-func periodicRefresh(ctx context.Context, w *csvwatch.Watcher, n *normalizer.Normalizer, m *mart.Mart, posDrop string, logger *slog.Logger) {
+func periodicRefresh(ctx context.Context, w *csvwatch.Watcher, n *normalizer.Normalizer, m *mart.Mart, logger *slog.Logger) {
 	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 	for {
@@ -290,9 +330,7 @@ func periodicRefresh(ctx context.Context, w *csvwatch.Watcher, n *normalizer.Nor
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := w.ProcessExisting(ctx, posDrop); err != nil {
-				logger.Warn("periodic drop-folder sweep", "err", err)
-			}
+			w.Sweep(ctx)
 			if _, _, err := n.Run(ctx, 0); err != nil {
 				logger.Warn("periodic normalize", "err", err)
 			}
@@ -383,7 +421,15 @@ func startMessaging(ctx context.Context, dataDir string, store *storage.Storage,
 				logger.Warn("closing whatsapp channel", "err", err)
 			}
 		})
-		logger.Info("whatsapp channel ready", slog.Bool("paired", wa.Paired()))
+		// Two-way: the owner can message the station's own WhatsApp and
+		// get an answer from this PC. No control plane, no SMS gateway
+		// and no inbound port — the station is already connected to
+		// WhatsApp to send the evening summary, and this listens on the
+		// same connection.
+		wa.SetInbound(messaging.NewInbound(store, answerer, logger).Handle)
+		logger.Info("whatsapp channel ready",
+			slog.Bool("paired", wa.Paired()),
+			slog.Bool("answers_questions", messaging.AnswerQuestionsEnabled(ctx, store)))
 	}
 
 	agent := messaging.New(messaging.Config{

@@ -13,7 +13,7 @@ func TestParseFileOK(t *testing.T) {
 lane_1,TX-001,2026-09-07T08:00:00Z,HSD,12.5,275.50,3437.50,CASH
 lane_2,TX-002,2026-09-07T08:01:00Z,PETROL_92,10.0,250.30,2503.00,CARD
 `
-	rows, errs, err := parseFile(strings.NewReader(in))
+	rows, errs, _, err := parseFile(strings.NewReader(in))
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestParseFileMissingColumn(t *testing.T) {
 	in := `pos_source_id,external_id,occurred_at
 lane_1,TX-001,2026-09-07T08:00:00Z
 `
-	_, _, err := parseFile(strings.NewReader(in))
+	_, _, _, err := parseFile(strings.NewReader(in))
 	if err == nil {
 		t.Fatal("expected error for missing required column")
 	}
@@ -57,7 +57,7 @@ func TestParseFileBadTimestamp(t *testing.T) {
 	in := `pos_source_id,external_id,occurred_at,product_alias,quantity_liters,unit_price,total_amount,payment_method
 lane_1,TX-001,not-a-timestamp,HSD,12.5,275.50,3437.50,CASH
 `
-	rows, errs, err := parseFile(strings.NewReader(in))
+	rows, errs, _, err := parseFile(strings.NewReader(in))
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}
@@ -79,7 +79,7 @@ lane_1,T2,2026-09-07T08:01:00Z,Hi-Speed Diesel,1,1,1,CASH
 lane_1,T3,2026-09-07T08:02:00Z,DIESEL,1,1,1,CASH
 lane_1,T4,2026-09-07T08:03:00Z,Diesel,1,1,1,CASH
 `
-	rows, _, err := parseFile(strings.NewReader(in))
+	rows, _, _, err := parseFile(strings.NewReader(in))
 	if err != nil {
 		t.Fatalf("parseFile: %v", err)
 	}

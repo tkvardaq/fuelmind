@@ -113,6 +113,15 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	if current == "" {
 		return errNoCurrentVersion
 	}
+	// Pick up a probation window that was still open when the launcher
+	// last stopped. Without this, restarting the service during
+	// probation — a reboot, a `sc stop`, the launcher itself crashing —
+	// would quietly end the window and let a bad version run on.
+	if until, crashes := readProbation(s.opt.BaseDir, current); !until.IsZero() {
+		s.probationUntil, s.probationCrashes = until, crashes
+		s.log.Printf("%s is still on probation until %s (%d crash(es) so far)",
+			current, until.Format(time.RFC3339), crashes)
+	}
 
 	job, err := newJobObject()
 	if err != nil {
@@ -168,6 +177,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			s.detector.Reset()
 			s.probationUntil = time.Now().Add(s.opt.Probation)
 			s.probationCrashes = 0
+			if err := writeProbation(s.opt.BaseDir, current, s.probationUntil, 0); err != nil {
+				s.log.Printf("could not record the probation window: %v", err)
+			}
 			backoff = time.Second
 			continue
 		}
@@ -177,6 +189,9 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			s.log.Printf("core %s exited (code %d, err %v) after %s", current, exitCode, runErr, time.Since(started).Round(time.Second))
 			if inProbation {
 				s.probationCrashes++
+				if err := writeProbation(s.opt.BaseDir, current, s.probationUntil, s.probationCrashes); err != nil {
+					s.log.Printf("could not record the probation crash: %v", err)
+				}
 				if s.probationCrashes >= 2 {
 					if prev, ok := s.rollback(current, "crashed repeatedly during post-update probation"); ok {
 						current = prev
@@ -263,6 +278,9 @@ func (s *Supervisor) runChild(ctx context.Context, v string, checkHealth bool) (
 			sleepCtx(childCtx, time.Until(until))
 			if childCtx.Err() == nil {
 				s.log.Printf("%s survived probation; update committed", v)
+				if err := clearProbation(s.opt.BaseDir); err != nil {
+					s.log.Printf("could not clear the probation window: %v", err)
+				}
 				if err := PruneVersions(s.opt.BaseDir); err != nil {
 					s.log.Printf("prune old versions: %v", err)
 				}
@@ -345,6 +363,9 @@ func (s *Supervisor) rollback(failed, reason string) (string, bool) {
 	s.detector.Reset()
 	s.probationUntil = time.Time{}
 	s.probationCrashes = 0
+	if err := clearProbation(s.opt.BaseDir); err != nil {
+		s.log.Printf("could not clear the probation window: %v", err)
+	}
 	return prev, true
 }
 

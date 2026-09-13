@@ -116,9 +116,9 @@ func (a *Agent) compose(ctx context.Context, s Settings) error {
 	if err != nil {
 		a.log.Warn("ingest alert", "err", err)
 	} else if !last.IsZero() && now.Sub(last) >= ingestStallAfter {
-		// Keyed by the hour as well as the day: a station that is down
-		// all day should say so again after a night's sleep, but not
-		// every minute.
+		// Keyed by the day: a station that is down all day says so once,
+		// then again after a night's sleep — not every minute. Widen this
+		// key only if you also intend to raise the alert frequency.
 		key := fmt.Sprintf("%s:%s", KindIngestStalled, now.Format("2006-01-02"))
 		a.queue(ctx, s, KindIngestStalled, key, ComposeIngestStalled(last, now))
 	}

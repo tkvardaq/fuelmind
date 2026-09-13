@@ -12,12 +12,20 @@
 
   {{if .Rows}}
   <section class="cards" aria-label="Totals">
-    <div class="card"><div class="label">Revenue</div><div class="big">{{formatMoney .TotalRev}}</div></div>
+    <div class="card"><div class="label">Revenue on costed days</div><div class="big">{{formatMoney .TotalRev}}</div></div>
     <div class="card"><div class="label">Fuel cost</div><div class="big">{{formatMoney .TotalCost}}</div></div>
     <div class="card"><div class="label">Margin</div><div class="big">{{formatMoney .TotalMargin}}</div></div>
     <div class="card"><div class="label">Margin %</div><div class="big">{{printf "%.1f%%" .TotalPct}}</div></div>
   </section>
-  <p class="muted small">Totals cover the {{.CostedDays}} day(s) that have a purchase price. Days without one show a dash.</p>
+  <p class="muted small">
+    These four figures cover only the <strong>{{.CostedDays}} day(s)</strong> that have a purchase
+    price recorded, so they can be compared with each other.
+    {{if .UncostedDays}}
+    Another {{.UncostedDays}} day(s) with {{formatMoney .UncostedRev}} of revenue are left out
+    because no purchase price covers them &mdash; add one in <a href="/settings">Settings</a> and
+    they fill in. They are shown with a dash in the table below.
+    {{end}}
+  </p>
 
   <div class="table-wrap">
   <table class="data">
